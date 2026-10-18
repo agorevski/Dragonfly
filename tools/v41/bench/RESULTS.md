@@ -579,3 +579,179 @@ and seed files, calibration/held-out/seeded run directories, the additional
 `files/collect_residency_profiles.py` preserve the exact corpus and bounded
 commands. Workload-specific profiles/seeds and raw model artifacts are not
 committed.
+
+## Additional four-GPU optimization screening
+
+These later runs used the same four RTX 8000 cards, local Q2_K checkpoint,
+512 virtual-memory prompt IDs, 96 output IDs, context 4096, eight CPU
+threads, auto expert slots, margin 2 GiB and a 96 GiB arena limit. Routing
+biases/skipping and prefix reuse were off. Each process made three complete
+requests; tables report the median of requests 1 and 2, excluding the
+process-cold request 0. Each comparison used one executable, not separate
+baseline and candidate builds. These are screening measurements, not broad
+workload or quality claims.
+
+An initial eight-case runtime/geometry screen used chunk-batch prefill,
+batch 128 / chunk 64, without fused gate/up. All 24 requests generated the
+same 96 IDs:
+
+| Change from eager control | Warm prefill tok/s | Warm decode tok/s |
+| --- | ---: | ---: |
+| Control | 91.518 | 21.558 |
+| Dense CUDA graphs | 90.486 | 21.683 |
+| Expert-tier graphs | 90.604 | 21.825 |
+| DMA overlap | 90.256 | 21.930 |
+| Both graph switches and DMA overlap | 89.795 | 21.703 |
+| Batch 256 / chunk 128 | 90.892 | 21.618 |
+| Batch 512 / chunk 128 | 90.091 | 21.587 |
+| Batch 512 / chunk 256 | 90.798 | 21.475 |
+
+None established a meaningful improvement in this ordered short screen.
+In particular, the small decode differences are not accepted as wins.
+
+The next 17 processes used executable
+`69af40eb` / SHA256
+`a3f1bc46d154c24bded9cd656c5bc1202729ef0b6b1e0bc909611bd4ecf30565`.
+All 51 requests generated exactly the same 96 IDs as the earlier screen,
+with zero file routes. Minimum MemAvailable across these runs was
+236.61 GiB, above the 40 GiB floor. Exact commands, configuration/harness
+hashes and all request metrics are in the raw artifacts.
+
+The prefill screen below adds existing `--fused-gu` to the control; every
+other candidate changes only its named knob. Gate/up pairing therefore
+does not claim the already-measured fused activation/quantization gain.
+
+| Prefill candidate | Warm prefill tok/s | Warm decode tok/s |
+| --- | ---: | ---: |
+| Fused control, four columns | 94.973 | 21.871 |
+| Eight columns only | 94.965 | 21.856 |
+| Paired gate/up loads, four columns | 105.120 | 21.654 |
+| Paired gate/up loads, eight columns | 112.930 | 21.770 |
+| Bounded init/finish graph cache | 93.795 | 21.785 |
+| Column-local row-map cache | 93.986 | 21.853 |
+| Both dense caches | 94.042 | 21.663 |
+| Stage 128 MiB per half | 96.105 | 21.423 |
+| Stage 256 MiB per half | 95.870 | 21.604 |
+| Return to fused control | 93.497 | 21.582 |
+
+Paired loads and the wider tile *with pairing* are promising; the wider
+tile alone is not. The graph/row caches showed no gain here. Larger staging
+buffers consumed additional host/device memory, reduced process-cold
+prefill throughput (88.957 / 84.851 versus control 91.074), and their small
+warm differences do not yet justify a recommendation, especially when
+reserving memory for KV cache.
+
+The decode screen keeps batch 128 / chunk 64 but leaves fused gate/up off,
+as in the initial runtime screen. Q3_K mode changes affect decode's grouped
+down-projection, not the separate batch kernel:
+
+| Decode candidate | Warm prefill tok/s | Warm decode tok/s |
+| --- | ---: | ---: |
+| Control | 89.857 | 21.633 |
+| Q3_K down mode 2 | 90.066 | 22.233 |
+| Q3_K down mode 4 | 90.178 | 22.206 |
+| Device activations plus device-only MoE input | 90.159 | 21.857 |
+| Owner-stream peer output | 89.967 | 21.724 |
+| Both transfer candidates | 90.012 | 21.725 |
+| Return to control | 89.862 | 21.771 |
+
+Q3_K modes 2/4 merit confirmation. The transfer changes passed the synthetic
+caller/owner, pinned-tail and forced-host fixtures, but did not establish a
+model-throughput gain. Mode 1 was excluded: the nonzero SM75 grouped Q2/Q2
+gate/up, Q3 down fixture reported an asynchronous unspecified launch failure
+before its batch reference comparison. No mode-1 model run was attempted.
+This does not identify the exact failing asynchronous kernel.
+
+Artifacts are session `files/next-runtime-measurements/`,
+`files/next-prefill-measurements/` and `files/next-decode-measurements/`;
+the corresponding `benchmark_next_*.py` drivers record the serial commands.
+No default or core Strata/Qwen path changed.
+
+## Confirmed kernel tuning and return controls
+
+The follow-up used source `cd1443e6ca8476f00608302d826f3b3a0c891575`,
+executable SHA256
+`b31a4aac341bab663ed8a78edd7949d2d31c6fc360df26e75631a41064687b50`,
+and the same four-card hardware, checkpoint, prompt, 96 output tokens,
+context and exact-routing settings above. CUDA 13.4 / SM75 and GCC 13.3
+were unchanged. All comparisons below used that same executable.
+
+The first nine processes each made five requests. Warm numbers exclude
+request 0 and take the median of the remaining four. C and D were returned
+to in reverse order to check the smaller block-geometry effect.
+
+| Case | Incremental setting | Warm prefill tok/s | Warm decode tok/s |
+| --- | --- | ---: | ---: |
+| A | Existing fused control, four columns | 94.371 | 21.808 |
+| B | A plus paired gate/up loads | 104.950 | 21.498 |
+| C | B plus eight-column tiles | 112.342 | 21.544 |
+| D | C plus four-warp batch down | 113.521 | 21.548 |
+| E | D plus Q3_K grouped down mode 2 | 113.878 | 21.778 |
+| F | E plus Q2_K grouped gate/up mode 2 | 113.736 | 22.504 |
+| G | E plus Q2_K grouped gate/up mode 4 | 113.778 | 22.522 |
+| D return | Four-warp batch down, grouped layouts unset | 114.254 | 21.451 |
+| C return | Eight-warp batch down, grouped layouts unset | 112.155 | 21.232 |
+
+Paired gate/up improved prefill 11.2% from A to B; the wider tile with
+pairing added 7.0% from B to C. Four-warp down improved C to D by 1.0%
+in the first order and 1.9% in the reverse-order return. Pooling the eight
+warm samples per geometry gives 112.155 versus 113.940 tok/s, a smaller
+1.6% effect. This is a bounded repeatable local observation, not a
+general 1.6% guarantee. None of these controls increases expert-cache
+quotas or retains extra dequantized weight copies.
+
+Three additional completed processes each made seven requests. Their warm
+medians exclude request 0 and use the remaining six:
+
+| Case | Grouped decode layout, retaining D's prefill controls | Warm prefill tok/s | Warm decode tok/s |
+| --- | --- | ---: | ---: |
+| H | Q2_K gate/up mode 2 only | 113.532 | 22.114 |
+| F return | Q2_K gate/up mode 2 and Q3_K down mode 2 | 113.667 | 22.302 |
+| E return | Q3_K down mode 2 only | 113.178 | 21.717 |
+
+Pooling each repeated configuration's warm samples gives D decode 21.495,
+E 21.757 and F 22.317 tok/s. Q3_K's incremental effect is modest, about
+1.2% on these pooled samples; Q2_K gate/up adds about 2.6% over E and
+remains positive when E/F execution order is reversed. H to F return
+also shows only a small Q3_K contribution. Do not present these as large
+decode gains or as quality evidence. Modes 2 and 4 were effectively tied
+in the first Q2_K screen.
+
+All **66 completed requests** in these two follow-ups generated the exact
+same 96 IDs, with zero file routes and at least 237.55 GiB MemAvailable.
+The user then requested stopping further improvements: the final
+`D-return-no-layouts` process was terminated, not counted as a completed
+measurement, and no further tuning was performed. These short single-topic
+trials do not establish behavior across workloads, concurrent serving or
+long contexts. All new optimizations remain opt-in.
+
+The benchmark controls for the fully combined measured case are:
+
+```sh
+python tools/v41/bench/benchmark.py \
+  --engine /path/to/ds41_generate --engine-revision BUILD_COMMIT \
+  --model /path/to/model-00001-of-00010.gguf --config /path/to/config.json \
+  --ids-file prompt-512.json --gpus 0,1,2,3 --expert-gpus auto \
+  --slots auto --arena-gib 96 --vram-margin 2 --ctx 4096 --threads 8 \
+  --prompt-batch 128 --chunk 64 --step-max 0 --chunk-batch --fused-gu \
+  --pair-gu --batch-columns 8 --batch-down-warps 4 --down-mode 2 --gu-mode 2 \
+  --disable-cuda-graphs --output-tokens 96 --repeats 5 --timeout 650 \
+  --output build-bench/combined
+```
+
+Remove only the relevant setting for each control; output directories must
+not already exist. The harness records exact argv, environment, executable,
+configuration and harness hashes. Session artifacts are
+`files/next-confirm-measurements/` and
+`files/next-decode-confirm-measurements/`, driven by
+`benchmark_confirm_wins.py`, `confirm-plan.json` and
+`decode-confirm-plan.json`.
+
+CPU CTest passed 13/13; the combined CUDA suite passed 29/30 initially, then
+the remaining single-tier fixture passed after explicitly pinning
+`--expert-gpus 0` so a multi-visible-card default does not alter that test.
+The added four-warp mixed CUDA cases passed 2/2. The merged
+`test_ds41_batch --gu-layouts` passed both Q2_K modes and mixed-format
+fallbacks with exact output floats and hidden q8 storage; the production
+Q2/Q2/Q3 FP64 oracle relative-L2 was about `8.3e-8`. Benchmark Python
+tests passed 7/7. No HIP/SYCL backend or upstream Strata/Qwen source changed.
