@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -66,11 +67,18 @@ def fixture(directory, gpu_experts=False, nonzero=False):
             payload = (b"".join(struct.pack("<e", 0.01) + bytes([1 + row % 31]) * 32
                                 for row in range(count // 32)) if nonzero else bytes(count // 32 * 34))
         elif type_id in (10, 11):
-            payload = bytes(count // 256 * (84 if type_id == 10 else 110))
+            block = bytes(84 if type_id == 10 else 110)
+            if nonzero:
+                block = (bytes([0x11]) * 16 + bytes([0xe4]) * 64 + struct.pack("<ee", .02, .005)
+                         if type_id == 10 else
+                         bytes([0xaa]) * 32 + bytes([0xe4]) * 64 + bytes([0x21]) * 12 + struct.pack("<e", .02))
+            payload = block * (count // 256)
         else:
             value = 1. if "norm" in name or "engram_q." in name or "engram_k." in name else 0.
-            payload = (b"".join(struct.pack("<f", 0.1 * math.sin(i + 1)) for i in range(count))
-                       if nonzero and value == 0. else struct.pack("<f", value) * count)
+            if nonzero and value == 0:
+                payload = b"".join(struct.pack("<f", .015 * math.sin(i * .013 + len(tensors))) for i in range(count))
+            else:
+                payload = struct.pack("<f", value) * count
         tensors.append((name, shape, type_id, payload))
 
     add("token_embd.weight", [dim, 4])
@@ -173,6 +181,11 @@ def main():
             raise AssertionError(result.stdout + result.stderr)
         if len(result.stdout.split()) != 2:
             raise AssertionError("Expected two generated token IDs: " + result.stdout + result.stderr)
+        fallback = subprocess.run(
+            command, env=dict(env, STRATA_DEVICE_ACTIVATIONS="1"), text=True, capture_output=True, timeout=60,
+        )
+        if fallback.returncode or fallback.stdout != result.stdout or "device activations:" in fallback.stderr:
+            raise AssertionError("CPU experts must keep the host activation path: " + fallback.stdout + fallback.stderr)
         if args.backend == "cuda":
             expert_directory = directory / "gpu-experts"
             expert_directory.mkdir()
@@ -197,6 +210,64 @@ def main():
                     if deferred and f"{capacity} experts in VRAM (" not in result.stderr:
                         raise AssertionError("Deferred GPU expert cache seed failed: " + result.stderr)
             print("GPU expert launcher: auto, explicit, zero budget and deferred prompt allocation passed")
+            activation_directory = directory / "activations"
+            activation_directory.mkdir()
+            activation_model, activation_config, _ = fixture(activation_directory, gpu_experts=True, nonzero=True)
+            activation_env = dict(expert_env, STRATA_V41_CONFIG=str(activation_config), STRATA_FILE_GPU="0")
+            for key in ("STRATA_DEVICE_ACTIVATIONS", "STRATA_X_HOST", "STRATA_DEC_HOSTSUM"):
+                activation_env.pop(key, None)
+            activation_command = expert_command.copy()
+            activation_command[activation_command.index("-m") + 1] = str(activation_model)
+            activation_command[activation_command.index("-n") + 1] = "4"
+            forced_path = activation_directory / "forced.txt"
+            forced_path.write_text("0\n2\n3\n0\n")
+            activation_env["STRATA_FORCE_IDS"] = str(forced_path)
+            for slots in ("4", "1", "0"):
+                baseline = None
+                for setting in (None, "0", "1"):
+                    logit_path = activation_directory / f"logits-{slots}-{setting}.f32"
+                    decode_path = activation_directory / f"decode-{slots}-{setting}.f32"
+                    run_env = dict(activation_env)
+                    run_env["STRATA_DUMP_DECODE_LOGITS"] = str(decode_path)
+                    if setting is not None:
+                        run_env["STRATA_DEVICE_ACTIVATIONS"] = setting
+                    result = subprocess.run(
+                        activation_command + ["--slots", slots, "--vram-margin", "10000" if slots == "0" else "0",
+                                              "--dump-logits", str(logit_path)],
+                        env=run_env, text=True, capture_output=True, timeout=60,
+                    )
+                    if result.returncode:
+                        raise AssertionError("Activation generation failed: " + result.stdout + result.stderr)
+                    logits = logit_path.read_bytes()
+                    decode = decode_path.read_bytes()
+                    if len(decode) != 4 * 4 * 4:
+                        raise AssertionError("Expected four decode vocabulary rows")
+                    values = struct.unpack("<" + "f" * (len(decode) // 4), decode)
+                    if not values or not all(math.isfinite(v) for v in values) or not any(values):
+                        raise AssertionError("Activation fixture must have finite, nonzero logits")
+                    # The only change is where identical F32 bytes are quantized: require exact logits and tokens.
+                    observed = (result.stdout, logits, decode)
+                    if baseline is None:
+                        baseline = observed
+                    elif observed != baseline:
+                        raise AssertionError(f"Activation setting={setting}, slots={slots} changed logits/tokens")
+                    if setting == "1":
+                        transfers = re.search(
+                            r"device activations: dense D2H skipped (\d+) bytes .*decode tier "
+                            r"D2H (\d+) / H2D (\d+) bytes, direct (\d+) calls", result.stderr,
+                        )
+                        if not transfers or int(transfers[1]) == 0:
+                            raise AssertionError("Opt-in did not skip the dense activation readback: " + result.stderr)
+                        _, d2h, h2d, direct = map(int, transfers.groups())
+                        if slots == "4" and (d2h or h2d or direct == 0):
+                            raise AssertionError("All-resident decode still staged activations: " + result.stderr)
+                        if slots == "0" and (d2h == 0 or h2d != d2h or direct):
+                            raise AssertionError("No-cache CPU misses lost their activation fallback: " + result.stderr)
+                        print(f"Device activation slots={slots}: dense D2H skipped={transfers[1]} bytes; "
+                              f"decode tier D2H={d2h} H2D={h2d} bytes, direct={direct}")
+                    elif "device activations:" in result.stderr:
+                        raise AssertionError("Unset/zero activation opt-in changed the default path")
+            print("Device activations: unset/zero/on exact nonzero logits and tokens; all-GPU, mixed and no-cache passed")
         for extra, message in (
             (["--chunk-mmq"], "--chunk-mmq is unavailable"),
             (["--expert-gpus", "0,1"], "unknown argument --expert-gpus"),

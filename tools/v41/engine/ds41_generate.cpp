@@ -548,6 +548,9 @@ int main(int argc, char ** argv) {
     // the host sum; no parts readback / routed upload per layer).  STRATA_DEC_HOSTSUM=1 = the host round trip
     // the routed tensor's device address: re-read after every dense.set_columns (elastic columns reallocate it)
     float * rdev1 = (!mc.cpu_only && !std::getenv("STRATA_DEC_HOSTSUM")) ? dense.routed_dev() : nullptr;
+    const char * device_activation_env = std::getenv("STRATA_DEVICE_ACTIVATIONS");
+    const bool device_activations = rdev1 && device_activation_env && device_activation_env[0] == '1';
+    int64_t activation_readback_skipped = 0;
     double dp[6] = {0, 0, 0, 0, 0, 0};
     long dp_n = 0;
     auto step = [&](int tok, int pos) -> bool {   // one token through every layer; logits via dense.logits
@@ -588,7 +591,10 @@ int main(int argc, char ** argv) {
             }
             if (dprof) { const double t = now_ms(); dp[1] += t - ta; ta = t; }
             const float * fn = nullptr;
-            if (!dense.attn_router(l, ids1.data(), w1.data(), &fn)) { ferr = dense.last_error(); return false; }
+            ggml_tensor * fn_dev = nullptr;
+            if (!dense.attn_router(l, ids1.data(), w1.data(), device_activations ? nullptr : &fn,
+                                   device_activations ? &fn_dev : nullptr)) { ferr = dense.last_error(); return false; }
+            if (device_activations) activation_readback_skipped += (int64_t) n_embd * sizeof(float);
             if (dprof) { const double t = now_ms(); dp[2] += t - ta; ta = t; }
             if (file_pred) {
                 for (int j = 0; j < top_k; ++j) {
@@ -607,7 +613,7 @@ int main(int argc, char ** argv) {
                     }
                 }
             }
-            const bool tok = rdev1 ? tier.run_to_dev(l, ids1.data(), w1.data(), fn, rdev1)
+            const bool tok = rdev1 ? tier.run_to_dev(l, ids1.data(), w1.data(), fn, rdev1, fn_dev ? fn_dev->data : nullptr)
                                    : tier.run(l, ids1.data(), w1.data(), fn, routed1.data());
             if (!tok) { ferr = "tier.run failed"; return false; }
             if (dprof) { const double t = now_ms(); dp[3] += t - ta; ta = t; }
@@ -1946,7 +1952,18 @@ int main(int argc, char ** argv) {
         }
     }
 #endif
+    // Optional numeric A/B diagnostic: one vocabulary-wide F32 row per ordinary decode output.
+    std::ofstream decode_logits;
+    if (const char * path = std::getenv("STRATA_DUMP_DECODE_LOGITS")) {
+        decode_logits.open(path, std::ios::binary);
+        if (!decode_logits) { std::fprintf(stderr, "ds41_generate: cannot open decode logits dump\n"); return 1; }
+    }
     for (; !spec && gen < a.n_predict; ++gen) {
+        if (decode_logits.is_open() &&
+            !decode_logits.write((const char *) lg.data(), (std::streamsize) (lg.size() * sizeof(float)))) {
+            std::fprintf(stderr, "ds41_generate: cannot write decode logits dump\n");
+            return 1;
+        }
         int tok = sample_p(lg.data(), nv, a.temp, 0, 1.0f, 0.0f, rng);
         if (gen < (int) forced.size()) {
             // STRATA_DEC_MARGIN=1 (gate tap, with STRATA_FORCE_IDS): per step the argmax, its logit and the forced
@@ -1967,6 +1984,11 @@ int main(int argc, char ** argv) {
     const double dec_ms = now_ms() - td0;
     if (prof_decode) Ds41MoeTier::profiler(false);
     const Ds41MoeStats st = tier.stats();
+    if (device_activations)
+        std::fprintf(stderr, "device activations: dense D2H skipped %lld bytes (prompt + decode); decode tier "
+                     "D2H %lld / H2D %lld bytes, direct %lld calls\n",
+                     (long long) activation_readback_skipped, (long long) st.activation_d2h_bytes,
+                     (long long) st.activation_h2d_bytes, (long long) st.device_activation_calls);
     std::fprintf(stderr, "decode: %d tokens in %.2f s = %.2f tok/s; experts %lld hit / %lld cpu / %lld pcie / %lld file "
                  "(%.1f%% VRAM hits), cpu %.0f ms, file %.0f ms; spec reads %lld issued / %lld used; prefetch %lld issued / "
                  "%lld outside the arena / %lld used\n",

@@ -363,6 +363,8 @@ struct Ds41MoeStats {
     int64_t vram_swaps = 0;         ///< vram_lru: misses / prefetches moved into a VRAM slot
     int64_t vram_demotes = 0;       ///< ...of which the victim went back to the arena (it had no arena copy)
     int64_t skipped = 0;            ///< skip_miss: low-weight misses dropped
+    int64_t activation_d2h_bytes = 0, activation_h2d_bytes = 0;  ///< decode input transfers inside the tier
+    int64_t device_activation_calls = 0;  ///< decode calls quantized directly from device input
 
     void add(const Ds41MoeStats& o);
     int64_t lookups() const { return hits + cpu + pcie + skipped; }
@@ -441,8 +443,10 @@ public:
     bool run(int64_t layer, const int32_t* ids6, const float* w6, const float* x, float* out);
     /// `run` with the weighted sum computed on the card and written to the device row `out_dev` (n_embd floats, e.g.
     /// the dense half's routed tensor): the same bits as `run`'s host sum, without its parts readback and upload.
-    /// GPU tier only (false in cpu_only).
-    bool run_to_dev(int64_t layer, const int32_t* ids6, const float* w6, const float* x, void* out_dev);
+    /// GPU tier only (false in cpu_only). Optional `x_dev` overrides `x` (which may then be null): same-device,
+    /// ready input, valid until this synchronous call returns. CPU-served misses read it back only when needed.
+    bool run_to_dev(int64_t layer, const int32_t* ids6, const float* w6, const float* x, void* out_dev,
+                    const void* x_dev = nullptr);
     /// The same with `x` already on the device (the engine's attention output).  CUDA modes only.
     bool run_dev(int64_t layer, const int32_t* ids6, const float* w6, const void* x_dev, float* out);
 

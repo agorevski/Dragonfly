@@ -120,7 +120,9 @@ public:
     void set_route_bias(int il, const float * bias);
     /// Layer il of the current pass: Engram (layers 1/14), attention, hc, ffn_norm, router, shared expert.
     /// ids / wts: n * n_used (token-major); *fn_host: n * n_embd floats (the routed experts' input, valid until the
-    /// next call).  `fn_dev` (optional): the same activations on the backend.
+    /// next call).  `fn_dev` (optional): the same activations on the backend. Passing a null `fn_host` skips only
+    /// the activation readback and requires `fn_dev`; ids / wts still reach the host and the backend is synchronized.
+    /// Consume the device activation before the next dense call can overwrite it.
     bool attn_router(int il, int * ids, float * wts, const float ** fn_host, ggml_tensor ** fn_dev = nullptr);
     /// Prefetch hint for layer il of a one-token pass (call before attn_router(il)): the layer's router applied to
     /// rms_norm(hc_pre(state, pre)) * ffn_norm.weight, + the selection bias, ranked; top_ids gets n_top (<= 16).
