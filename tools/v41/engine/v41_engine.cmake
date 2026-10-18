@@ -129,6 +129,12 @@ if(STRATA_DS41_BUILD_TESTS)
     if(Python3_Interpreter_FOUND)
         add_test(NAME ds41_span_cache COMMAND "${Python3_EXECUTABLE}" "${_v41_dir}/test_ds41_standard.py"
             --engine "$<TARGET_FILE:test_ds41_dense>" --span-cache-test --work "${CMAKE_CURRENT_BINARY_DIR}/span-cache-fixture")
+        if(STRATA_DS41_CUDA)
+            target_compile_definitions(test_ds41_dense PRIVATE DS41_HAVE_CUDA)
+            add_test(NAME ds41_span_cache_cuda COMMAND "${Python3_EXECUTABLE}" "${_v41_dir}/test_ds41_standard.py"
+                --engine "$<TARGET_FILE:test_ds41_dense>" --span-cache-test --backend cuda
+                --work "${CMAKE_CURRENT_BINARY_DIR}/span-cache-cuda-fixture")
+        endif()
     endif()
     add_executable(test_ds41_graphs "${_v41_dir}/test_ds41_graphs.cpp")
     target_include_directories(test_ds41_graphs PRIVATE "${_v41_dir}" "${_ds41_ggml_src}")

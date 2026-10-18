@@ -162,7 +162,8 @@ def main():
     try:
         model, config_path, config = fixture(directory, nonzero=args.rollback_test or args.span_cache_test)
         if args.span_cache_test:
-            result = subprocess.run([str(args.engine.resolve()), "--span-cache-test", str(model)],
+            flag = "--span-cache-cuda-test" if args.backend == "cuda" else "--span-cache-test"
+            result = subprocess.run([str(args.engine.resolve()), flag, str(model)],
                                     env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),
                                     text=True, capture_output=True, timeout=180)
             if result.returncode:

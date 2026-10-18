@@ -9,6 +9,9 @@
 #include "strata/kernels/cpu/ptq1_0.hpp"
 
 #include "ggml-cpu.h"
+#ifdef DS41_HAVE_CUDA
+#include "ggml-cuda.h"
+#endif
 
 #include <chrono>
 #include <algorithm>
@@ -99,12 +102,26 @@ std::vector<int> parse_ints(const std::string & s) {
 
 }  // namespace
 
-static int span_cache_test(const std::string & path) {
+static int span_cache_test(const std::string & path, bool cuda = false) {
+    struct Backend {
+        ggml_backend_t value = nullptr;
+        ~Backend() { if (value) ggml_backend_free(value); }
+    } backend;
+    if (cuda) {
+#ifdef DS41_HAVE_CUDA
+        backend.value = ggml_backend_cuda_init(0);
+        if (!backend.value) { std::fprintf(stderr, "CUDA backend init failed\n"); return 1; }
+#else
+        std::fprintf(stderr, "built without CUDA\n");
+        return 1;
+#endif
+    }
     std::vector<uint8_t> reference;
     for (int mode = 0; mode < 4; ++mode) {
         setenv("STRATA_DS41_PREFILL_GRAPH_CACHE", mode & 1 ? "1" : "0", 1);
         setenv("STRATA_DS41_PREFILL_ROW_CACHE", mode & 2 ? "1" : "0", 1);
         Ds41DenseConfig cfg;
+        cfg.backend = backend.value;
         cfg.n_threads = 2;
         cfg.ctx_max = 512;
         cfg.max_pass = 3;
@@ -158,13 +175,15 @@ static int span_cache_test(const std::string & path) {
             return 1;
         }
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        std::printf("span cache graph=%d rows=%d: bitwise exact, %.3f s\n", mode & 1, (mode >> 1) & 1, seconds);
+        std::printf("%s span cache graph=%d rows=%d: bitwise exact, %.3f s\n",
+                    cuda ? "CUDA" : "CPU", mode & 1, (mode >> 1) & 1, seconds);
     }
     return 0;
 }
 
 int main(int argc, char ** argv) {
     if (argc == 3 && std::string(argv[1]) == "--span-cache-test") return span_cache_test(argv[2]);
+    if (argc == 3 && std::string(argv[1]) == "--span-cache-cuda-test") return span_cache_test(argv[2], true);
     if (argc < 2) { std::fprintf(stderr, "usage: see the file header\n"); return 2; }
     std::string path = argv[1], out = "/tmp/ds41", mode = "both";
     std::vector<int> toks;
