@@ -289,7 +289,8 @@ def main():
             expert_command = command.copy()
             expert_command[expert_command.index("-m") + 1] = str(expert_model)
             expert_command[expert_command.index("--experts") + 1] = "gpu"
-            expert_command += ["--arena-gib", "0", "--pf-b", "0", "--pcie", "0"]
+            # These cache/activation fixtures exercise one tier, independent of the visible-device count.
+            expert_command += ["--expert-gpus", "0", "--arena-gib", "0", "--pf-b", "0", "--pcie", "0"]
             for deferred in (False, True):
                 for slots, margin, capacity in (("auto", "10000", 0), ("auto", "0", 4), ("1", "0", 1)):
                     extra = ["--slots", slots, "--vram-margin", margin]
