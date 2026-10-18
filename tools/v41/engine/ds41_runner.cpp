@@ -287,9 +287,19 @@ bool Ds41MoeRunner::run_device(int64_t l, int n, const int32_t * ids, const floa
     int caller = 0;
     try { check(cudaGetDevice(&caller)); }
     catch (const std::runtime_error & e) { std::fprintf(stderr, "%s\n", e.what()); return false; }
+    static const bool device_input = [] {
+        const char* v = std::getenv("STRATA_MOE_DEVICE_INPUT");
+        return v && v[0] == '1';
+    }();
+    static const bool peer_output = [] {
+        const char* v = std::getenv("STRATA_MOE_PEER_OUTPUT");
+        return v && v[0] == '1';
+    }();
+    const bool direct_input = mode == 0 && x_dev && device_input;
+    const bool direct_output = mode == 0 && peer_output;
     // Device input belongs to the dense caller, not the remote expert owner.
     std::vector<float> host;
-    if (x_dev) {
+    if (x_dev && !direct_input) {
         host.resize(size_t(n * hidden_));
         try { check(cudaMemcpy(host.data(), x_dev, host.size() * sizeof(float), cudaMemcpyDeviceToHost)); }
         catch (const std::runtime_error & e) { std::fprintf(stderr, "%s\n", e.what()); return false; }
@@ -298,7 +308,7 @@ bool Ds41MoeRunner::run_device(int64_t l, int n, const int32_t * ids, const floa
     return dispatch(l, [&](Shard & s) {
         const size_t bytes = size_t(n * hidden_) * sizeof(float);
         void * dst = out;
-        if (s.device != caller) {
+        if (s.device != caller && !direct_output) {
             if (s.output_bytes < bytes) {
                 if (s.output) check(cudaFree(s.output));
                 s.output = nullptr;
@@ -308,10 +318,11 @@ bool Ds41MoeRunner::run_device(int64_t l, int n, const int32_t * ids, const floa
             }
             dst = s.output;
         }
-        const bool ok = mode == 0 ? s.tier->run_to_dev(l, ids, w, x, dst) :
+        const bool ok = mode == 0 ? s.tier->run_to_dev(l, ids, w, x, dst, direct_input ? x_dev : nullptr,
+                                                     direct_input ? caller : -1, direct_output ? caller : -1) :
                         mode == 1 ? s.tier->run_multi_to_dev(l, n, ids, w, x, dst) :
                                     s.tier->run_chunk_dev(l, n, ids, w, x, dst);
-        if (ok && s.device != caller) {
+        if (ok && s.device != caller && !direct_output) {
             check(cudaMemcpyPeerAsync(out, caller, dst, s.device, bytes, nullptr));
             check(cudaStreamSynchronize(nullptr)); // Dense consumes on a different nonblocking stream.
         }
