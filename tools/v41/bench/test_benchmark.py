@@ -39,10 +39,10 @@ class BenchmarkTests(unittest.TestCase):
         args = SimpleNamespace(engine="engine", model="model", slots="auto",
                                vram_margin=2, arena_gib=64, pcie=1, pf_b=0,
                                prompt_batch=64, chunk=32, threads=8, ctx=4096,
-                               seed=1, chunk_batch=False)
+                               seed=1, chunk_batch=False, expert_gpus="auto")
         self.assertNotIn("--chunk-batch", B.command(args))
         args.chunk_batch = True
-        self.assertEqual(B.command(args)[-1], "--chunk-batch")
+        self.assertIn("--chunk-batch", B.command(args))
 
     def test_mock_process_success_error_and_timeout_cleanup(self):
         root = Path.cwd() / ("build-bench-test-" + uuid.uuid4().hex)
@@ -51,7 +51,7 @@ class BenchmarkTests(unittest.TestCase):
             ids = root / "ids.json"
             ids.write_text("[1, 2, 3]")
             for mode in ("success", "error", "timeout", "diagnostic", "late-diagnostic",
-                         "memory", "occupied"):
+                         "memory", "occupied", "occupied-multi"):
                 fake = root / ("engine-" + mode)
                 fake.write_text(
                     "#!/usr/bin/env python3\nimport sys,time\n"
@@ -75,10 +75,13 @@ class BenchmarkTests(unittest.TestCase):
                 if mode == "success":
                     argv += ["--device-activations", "--tier-graph", "--dma-overlap",
                              "--disable-cuda-graphs", "--chunk-batch"]
+                if mode == "occupied-multi":
+                    argv += ["--gpus", "0,3"]
                 def capture(cmd):
                     if cmd[0] == "nvidia-smi":
-                        return ("index, uuid\n0, fake-gpu" if "--query-gpu=" in " ".join(cmd)
-                                else "fake-gpu, 42, other, 100" if mode == "occupied" else "")
+                        return ("index, uuid\n0, fake-gpu\n3, other-gpu" if "--query-gpu=" in " ".join(cmd)
+                                else "fake-gpu, 42, other, 100" if mode == "occupied" else
+                                "other-gpu, 42, other, 100" if mode == "occupied-multi" else "")
                     return "test"
                 memory = iter([100, 100, 39]) if mode == "memory" else None
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(B, "capture", capture), \
@@ -100,13 +103,13 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertIn("--chunk-batch", result["command"])
                 else:
                     self.assertIn("error", result)
-                    if mode == "occupied":
+                    if mode.startswith("occupied"):
                         self.assertNotIn("pid", result)
                     else:
                         self.assertIsNotNone(result["exit_code"])
                         with self.assertRaises(ProcessLookupError):
                             B.os.kill(result["pid"], 0)
-                if mode != "occupied":
+                if not mode.startswith("occupied"):
                     for name in ("STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
                                  "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS"):
                         self.assertEqual(result["environment"][name],
