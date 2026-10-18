@@ -479,6 +479,18 @@ producer/consumer streams and device-context restoration. Run the fixture
 with neither flag, each flag alone and both flags, after reserving its GPUs.
 These are performance candidates, not measured throughput claims.
 
+`STRATA_EXP_MODE_T10=2` or `4` additionally enables two or four Q2_K
+gate/up rows per warp in grouped experts. This reuses the existing Q2_K dot
+product and accumulation order; no quantization or route changes are made.
+Unset retains the old launch, including on devices with an automatic
+nonzero layout default. Mixed Q2_K/Q3_K gate/up keeps its existing kernel.
+`test_ds41_batch --gu-layouts` compares both modes at 5120/2304 against the
+unchanged batch arithmetic, with nonzero quantized experts, empty groups,
+permuted destinations, zero activations, clamp cases and mixed-format
+fallbacks. Unset `STRATA_EXP_MODE_T10` and `STRATA_EXP_MODE_T11` for that
+fixture; it fixes Q3_K down to mode 0 to isolate gate/up. GPU reservation
+is required. These modes have not yet been measured on a full checkpoint.
+
 The opt-in prints skipped dense activation bytes and decode-tier input
 transfer counters. These count only activation transfers, not expert weights,
 router data or routed outputs. `STRATA_DUMP_DECODE_LOGITS=PATH` optionally
