@@ -13,6 +13,8 @@ Strata fait tourner **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-F
 un grand modèle d'IA, très capable, qui demande d'habitude un serveur. Il discute, écrit du code, lit des images et
 fonctionne avec vos applications et vos agents de code. Rien ne quitte votre PC.
 
+Ce fork propose aussi une extension expérimentale pour **DeepSeek V4.1 Flash1017**, à activer explicitement, via une procédure distincte sous Linux pour CPU ou NVIDIA ; consultez le [guide en anglais](tools/v41/README.md). L'installateur Strata existant et les paramètres par défaut de Qwen restent inchangés.
+
 ## Quelle est sa vitesse ?
 
 Nous l'avons mesurée sur deux PC de jeu ordinaires. Un token correspond à environ ¾ d'un mot.

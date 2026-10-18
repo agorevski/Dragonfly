@@ -12,6 +12,8 @@ NVIDIA 或 AMD 显卡（12 GB 及以上）· Windows 或 Linux · 免费开源</
 Strata 能在普通电脑上运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**。这是一个又大又聪明的
 AI 模型，通常要用服务器才能跑。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。所有数据都留在你的电脑上。
 
+本分支还提供需显式启用的实验性 **DeepSeek V4.1 Flash1017** 附加组件，采用独立的 Linux CPU 或 NVIDIA 运行路径，详见[英文指南](tools/v41/README.md)。现有 Strata 安装程序和 Qwen 默认设置保持不变。
+
 ## 速度有多快？
 
 我们在两台普通的游戏电脑上做了测试。一个 token 大约相当于 ¾ 个英文单词。

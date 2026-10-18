@@ -10,6 +10,23 @@ New here? Start with the [README](../README.md); installing step by step is in [
 > [Images](#images-vision) ·
 > [Troubleshooting](#troubleshooting) · [How it works](#how-it-works)
 
+## DeepSeek V4.1 Flash 1017 (opt-in)
+
+The [experimental port](../tools/v41/README.md) is a standalone engine under `tools/v41/` with its own serving
+adapter, for Linux x86-64 CPU or one NVIDIA CUDA GPU only. Vision and multi-GPU serving are unsupported.
+The root CMake hook `STRATA_ENABLE_DS41` is **OFF** by default; CUDA targets additionally need
+`STRATA_DS41_CUDA=ON`. The normal `src/`, `include/`, `serve/` and `setup.py` paths are unchanged,
+and setup has no DeepSeek family. Use the add-on's build and launch instructions, not Qwen server settings.
+
+The documented checkpoint is
+[mrfakename/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF),
+Q2_K in 10 shards (~247 GiB), with matching `config.json` and tokenizer from
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017).
+Raw safetensors are not direct input. None of the Qwen memory estimates or measurements below establish
+DeepSeek requirements or speed. Short Q2_K checkpoint generation and streaming smoke tests passed on one
+Quadro RTX 8000; the port guide records the scope. Reference-logit equivalence and broader model quality
+have not been established, and the smoke tests are not throughput benchmarks.
+
 ---
 
 ## Speed (measured)

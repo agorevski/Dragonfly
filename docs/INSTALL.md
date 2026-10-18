@@ -9,6 +9,17 @@ this for you with [AI_SETUP.md](AI_SETUP.md).
 > [Older CPUs](#older-cpus-experimental) · [Updating](#updating) · [Where things are stored](#where-things-are-stored) ·
 > [Setup's questions](#setups-questions) · [Tuning](#tuning-for-your-pc) · [All options](#options-without-questions)
 
+> **DeepSeek V4.1 Flash 1017 is a separate, opt-in experiment.** Follow
+> [tools/v41/README.md](../tools/v41/README.md) for its standalone engine build and isolated serving adapter,
+> not the normal setup flow below. `setup.py` has no DeepSeek family. The port targets Linux x86-64 with CPU
+> or one NVIDIA CUDA GPU only; vision and multi-GPU serving are unsupported. Its Q2_K GGUF input from
+> [mrfakename](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF) is 10 shards (~247 GiB);
+> obtain the matching config and tokenizer from
+> [the original model](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017), not raw safetensors as engine input.
+> The Qwen requirements and measurements below do not apply. Short Q2_K checkpoint generation and streaming
+> smoke tests passed on one Quadro RTX 8000; see the port guide for scope, not quality or performance claims.
+> Normal setup and its Qwen defaults are unchanged.
+
 ## What you need
 
 | | |

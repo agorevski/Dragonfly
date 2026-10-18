@@ -13,6 +13,9 @@ Strata runs **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Nex
 large, smart AI model that usually needs a server. It chats, writes code, reads pictures and works with your apps
 and coding agents. Nothing leaves your PC.
 
+This fork also has an opt-in, experimental [DeepSeek V4.1 Flash 1017 add-on](tools/v41/README.md).
+It leaves the normal Strata installer and Qwen defaults unchanged.
+
 ## How fast is it?
 
 We measured it on two ordinary gaming PCs. A token is about ¾ of a word.

@@ -1,11 +1,25 @@
 # Which model? Sizes, versions and what fits
 
-Strata runs one model, [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), in several **sizes**
+Strata's normal installer runs [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), in several **sizes**
 (the same model, compressed more or less) and several **versions** (the original, a coding version, a fine-tune).
 The installer recommends one for your PC; this page explains the choice. Back to the [README](../README.md).
 
 > **On this page:** [Pick by RAM](#pick-by-ram) · [Speed](#how-fast-is-each-size) · [The sizes](#the-sizes) ·
 > [Will it fit?](#will-it-fit) · [The versions](#the-versions) · [Adding another model](#adding-or-switching-models)
+
+## DeepSeek V4.1 Flash 1017 (experimental, separate engine)
+
+The opt-in [DeepSeek V4.1 port](../tools/v41/README.md) lives in `tools/v41/`, separate from the Qwen engine.
+It is experimental on Linux x86-64 with CPU or one NVIDIA CUDA GPU; it has no vision or multi-GPU serving.
+`setup.py` has no DeepSeek family: the Qwen choices and defaults below are unchanged.
+
+Its documented input is [mrfakename/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF),
+Q2_K in **10 shards, about 247 GiB** total. Use the matching `config.json` and tokenizer from
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017);
+the original raw safetensors are not direct engine input. Keep all GGUF shards together.
+The Qwen RAM, VRAM, download and speed figures on this page do not apply to DeepSeek.
+Short Q2_K checkpoint generation and HTTP streaming smoke tests passed on one Quadro RTX 8000.
+See the port guide for the exact scope; these are not model-quality or throughput benchmarks.
 
 ## Pick by RAM
 
