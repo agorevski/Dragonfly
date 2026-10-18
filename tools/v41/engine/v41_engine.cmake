@@ -190,6 +190,9 @@ if(STRATA_DS41_BUILD_TESTS)
         set_tests_properties(ds41_batch_pair_implies_fused PROPERTIES SKIP_RETURN_CODE 77
             ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=0;STRATA_DS41_BATCH_COLS=4;STRATA_DS41_BATCH_PAIR_GU=1")
         foreach(_cols 4 8)
+            add_test(NAME ds41_batch_down4_cols${_cols} COMMAND test_ds41_batch --probe)
+            set_tests_properties(ds41_batch_down4_cols${_cols} PROPERTIES SKIP_RETURN_CODE 77
+                ENVIRONMENT "STRATA_DS41_BATCH_DOWN_WARPS=4;STRATA_DS41_BATCH_COLS=${_cols};STRATA_DS41_BATCH_PAIR_GU=1;STRATA_DS41_BATCH_FUSED_GU=1")
             foreach(_pair 0 1)
                 add_test(NAME ds41_batch_cols${_cols}_pair${_pair} COMMAND test_ds41_batch --quick)
                 set_tests_properties(ds41_batch_cols${_cols}_pair${_pair} PROPERTIES SKIP_RETURN_CODE 77

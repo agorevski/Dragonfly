@@ -2,6 +2,7 @@
 // Private prefill experiments (require chunk batching):
 // STRATA_DS41_BATCH_COLS=8 reuses decoded weights across eight tokens (default four).
 // STRATA_DS41_BATCH_PAIR_GU=1 reuses input q8 loads for gate/up and implies fused GU.
+// STRATA_DS41_BATCH_DOWN_WARPS=4 halves the down CTA (default eight row warps).
 // Flags are read once; unset/other values retain the existing four-column/unpaired path.
 namespace {
 
@@ -140,7 +141,7 @@ __device__ __forceinline__ void ds41_batch_dot_pair(
         if (c < n) { gate[c] = warp_sum(gate[c]); up[c] = warp_sum(up[c]); }
 }
 
-template<int GT, int UT, bool DOWN, int COLS = DS41_BATCH_COLS>
+template<int GT, int UT, bool DOWN, int COLS = DS41_BATCH_COLS, int WARPS = 8>
 __global__ void ds41_batch_rows(const NativeExpertLayout L, const unsigned long long* grp_ptr,
                                const int32_t* grp_start, const int32_t* n_groups,
                                const int32_t* ent_dst, const int32_t* ent_tok,
@@ -151,7 +152,7 @@ __global__ void ds41_batch_rows(const NativeExpertLayout L, const unsigned long 
     const int n = min(COLS, grp_start[g + 1] - e);
     if (n <= 0) return;
     const int lane = threadIdx.x & 31;
-    const int row = blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int row = blockIdx.x * WARPS + (threadIdx.x >> 5);
     const int rows = DOWN ? L.n_embd : 2 * L.n_ff;
     if (row >= rows) return;
     const bool is_up = !DOWN && row >= L.n_ff;
@@ -277,9 +278,19 @@ static bool ds41_batch_launch(const NativeExpertLayout& L, const unsigned long l
         swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(
             gate, up, grp_start, n_groups, (int) L.n_ff, hq, L.swiglu_limit);
     }
-    const dim3 down((L.n_embd + 7) / 8, (unsigned) cap_groups, tiles);
-    ds41_batch_rows<10, 10, true, COLS><<<down, 256, 0, s>>>(
-        L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, hq, gate, up, out);
+    static const bool down4 = [] {
+        const char* v = std::getenv("STRATA_DS41_BATCH_DOWN_WARPS");
+        return v && v[0] == '4' && v[1] == '\0';
+    }();
+    if (down4) {
+        const dim3 down((L.n_embd + 3) / 4, (unsigned) cap_groups, tiles);
+        ds41_batch_rows<10, 10, true, COLS, 4><<<down, 128, 0, s>>>(
+            L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, hq, gate, up, out);
+    } else {
+        const dim3 down((L.n_embd + 7) / 8, (unsigned) cap_groups, tiles);
+        ds41_batch_rows<10, 10, true, COLS><<<down, 256, 0, s>>>(
+            L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, hq, gate, up, out);
+    }
     check("native_expert_batch");
     return true;
 }

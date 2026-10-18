@@ -240,7 +240,8 @@ int main(int argc, char** argv) {
                 std::getenv("CUDA_VISIBLE_DEVICES") ? std::getenv("CUDA_VISIBLE_DEVICES") : "(unset)");
     std::printf("STRATA_DS41_BATCH_FUSED_GU=%s\n", std::getenv("STRATA_DS41_BATCH_FUSED_GU") ?
                 std::getenv("STRATA_DS41_BATCH_FUSED_GU") : "(unset; unfused)");
-    for (const char* name : {"STRATA_DS41_BATCH_COLS", "STRATA_DS41_BATCH_PAIR_GU"})
+    for (const char* name : {"STRATA_DS41_BATCH_COLS", "STRATA_DS41_BATCH_PAIR_GU",
+                             "STRATA_DS41_BATCH_DOWN_WARPS"})
         std::printf("%s=%s\n", name, std::getenv(name) ? std::getenv(name) : "(unset)");
     auto L = k::native_expert_layout(10, 11, 5120, 2304);
     auto bad = L; bad.n_embd = 2560;
