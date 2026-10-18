@@ -47,6 +47,25 @@ and inherited switch values are removed before explicit settings are applied.
 `--fused-gu` explicitly enables the experimental fused gate/up activation
 and quantization kernel and requires `--chunk-batch`; it is otherwise off.
 
+Further experimental controls isolate specific work rather than changing
+engine defaults:
+
+| Control | Requirement and scope |
+| --- | --- |
+| `--batch-columns 8` | Eight-column expert weight-reuse tiles; requires `--chunk-batch`. |
+| `--pair-gu` | Reuse activation loads for gate/up; requires `--chunk-batch --fused-gu`. |
+| `--prefill-graph-cache` | Bounded init/finish graph cache, independent of CUDA graph capture. |
+| `--prefill-row-cache` | Reuse column-local prefill row maps across layers. |
+| `--stage-mib 128` | Set each streamed-expert staging half; also accepts 32, 64, 256 or 512. Allocation may be capped by free VRAM. |
+| `--down-mode 2` | Existing Q3_K decode down-projection layout; modes 0, 1 and 4 are also exposed for experiments. Mode 1 failed the local SM75 nonzero fixture and is excluded from real-model measurements. |
+| `--moe-device-input` | Keep multi-GPU expert input on device; requires `--device-activations`. |
+| `--moe-peer-output` | Copy remote expert output on the owner stream before its completion wait. |
+
+These are candidates, not measured performance recommendations. Compare paired
+gate/up against a control already using `--fused-gu`, and report extra staging
+VRAM rather than treating it as free speed. Each flag is recorded in the
+artifact environment; inherited `MIMO_*` staging overrides are also removed.
+
 The measured four-card prefill follow-up reached 90.570 tok/s warm with
 512 input tokens using `--prompt-batch 128 --chunk 64 --chunk-batch --step-max 0`,
 versus 65.148 with batch 32 / chunk 16. These are short same-machine samples,
@@ -84,7 +103,7 @@ expert caches, and adaptive arena warm but redo full prefill with prefix reuse
 disabled. OS page-cache warmth is uncontrolled across all runs. Do not compare
 these labels as cold-disk measurements. Route and file biases are zero,
 pruning/skipping and encoder skipping are disabled, and no DSpark draft is
-loaded. Other STRATA/DS41/GGML environment overrides are removed (except the
+loaded. Other STRATA/DS41/GGML/MIMO environment overrides are removed (except the
 explicit settings above). Standard
 checkpoint Engram is retained. Keep raw failures and do not report a speedup
 from incomplete generation or change defaults based on these short runs.
