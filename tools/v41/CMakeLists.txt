@@ -8,6 +8,8 @@ endif()
 
 get_filename_component(DS41_STRATA_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 option(STRATA_DS41_CUDA "Build the isolated DeepSeek-V4.1 CUDA engine" OFF)
+option(STRATA_DS41_CUDA_GRAPHS "Enable stock CUDA graph capture in the isolated DS41 backend" OFF)
+set(STRATA_DS41_CUDA_BUILD_JOBS "8" CACHE STRING "Parallel jobs for the isolated ggml CUDA build")
 option(STRATA_DS41_BUILD_TESTS "Build DeepSeek-V4.1 tests (including CPU-only fixtures)" ON)
 option(STRATA_DS41_DSPARK "Build the optional DSpark draft stack" OFF)
 set(STRATA_DS41_GGML_DIR "" CACHE PATH "llama.cpp checkout for standalone DS41 builds")
@@ -51,6 +53,9 @@ endif()
 get_target_property(_ds41_ggml_src ggml-base SOURCE_DIR)
 if(STRATA_DS41_CUDA)
     if(TARGET ggml-cuda)
+        if(STRATA_DS41_CUDA_GRAPHS AND NOT GGML_CUDA_GRAPHS)
+            message(FATAL_ERROR "STRATA_DS41_CUDA_GRAPHS requires the existing ggml-cuda target to use GGML_CUDA_GRAPHS=ON")
+        endif()
         set(_ds41_cuda_backend ggml-cuda)
     else()
         # ggml_add_backend_library links the backend to the global ggml target. Build the stock backend
@@ -72,9 +77,10 @@ if(STRATA_DS41_CUDA)
                 "-DCUDAToolkit_ROOT=${CUDAToolkit_BIN_DIR}/.."
                 "-DDS41_GGML_SOURCE=${_ds41_ggml_src}/.."
                 -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=OFF -DGGML_CUDA=ON
+                "-DGGML_CUDA_GRAPHS=${STRATA_DS41_CUDA_GRAPHS}"
                 -DGGML_BACKEND_DL=OFF -DGGML_OPENMP=OFF -DGGML_CUDA_NCCL=OFF
                 -DGGML_BUILD_TESTS=OFF -DGGML_BUILD_EXAMPLES=OFF
-            BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --target ggml-cuda --parallel 8
+            BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --target ggml-cuda --parallel "${STRATA_DS41_CUDA_BUILD_JOBS}"
             INSTALL_COMMAND ""
             BUILD_BYPRODUCTS "${_ds41_cuda_archive}")
         add_library(ds41_ggml_cuda STATIC IMPORTED)
