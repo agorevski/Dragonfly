@@ -65,15 +65,34 @@ struct Device {
 }
 #endif
 
-Ds41MoeRunner::~Ds41MoeRunner() { close(); }
+Ds41MoeRunner::~Ds41MoeRunner() { write_route_profile(); close(); }
+
+bool Ds41MoeRunner::write_route_profile() const {
+    if (route_profile_path.empty()) return true;
+    const std::function<bool(int64_t,int64_t)> snapshot = !initialized_
+        ? std::function<bool(int64_t,int64_t)>{}
+        : [this](int64_t l, int64_t e) { return resident(l, e); };
+    if (route_profile.write(route_profile_path, snapshot)) return true;
+    std::fprintf(stderr, "route profile: failed to write %s\n", route_profile_path.c_str());
+    return false;
+}
 
 bool Ds41MoeRunner::init(const Ds41MoeGeom & g, Ds41BlobSource * source, const Ds41MoeConfig & cfg,
-                         const std::vector<int> & devices, double reserve_gib, std::string & error) {
+                         const std::vector<int> & devices, double reserve_gib, std::string & error,
+                         const std::vector<std::pair<int32_t,int32_t>> * selected) {
     close();
-    if (devices.empty()) return Ds41MoeTier::init(g, source, cfg, error);
+    if (selected && devices.size() < 2) {
+        error = "--cache-seed requires persistent multi-GPU execution";
+        return false;
+    }
+    if (devices.empty()) {
+        initialized_ = Ds41MoeTier::init(g, source, cfg, error);
+        return initialized_;
+    }
     error.clear();
 #ifndef DS41_HAVE_CUDA
     (void) reserve_gib;
+    (void) selected;
     error = "multi-GPU expert execution requires a CUDA build";
     return false;
 #else
@@ -87,6 +106,7 @@ bool Ds41MoeRunner::init(const Ds41MoeGeom & g, Ds41BlobSource * source, const D
             cfg.cpu_only || cfg.pcie_frac != 1 || cfg.pf_b != 0 || g.per_expert() ||
             g.n_layers < int64_t(devices.size()) || !cfg.exclude.empty() ||
             !std::isfinite(reserve_gib) || reserve_gib < 1 ||
+            reserve_gib >= double(SIZE_MAX / 1073741824ull) ||
             !std::isfinite(cfg.arena_gib) || cfg.arena_gib < 0) {
             error = "multi-GPU requires distinct devices, uniform layer formats, --pcie 1, --pf-b 0, "
                     "no pruning, and --vram-margin >= 1; use --expert-gpus 0 for the single-GPU path";
@@ -104,6 +124,20 @@ bool Ds41MoeRunner::init(const Ds41MoeGeom & g, Ds41BlobSource * source, const D
         const size_t stride = (size_t(source->blob_bytes()) + 255) / 256 * 256;
         const size_t reserve = size_t(reserve_gib * 1073741824.0);
         std::vector<int64_t> slots(devices.size());
+        std::vector<bool> chosen;
+        std::vector<int64_t> quotas(devices.size());
+        if (selected) {
+            chosen.assign(size_t(g.n_layers * g.n_experts), false);
+            if (selected->empty()) throw std::runtime_error("cache seed: empty selection");
+            for (const auto & le : *selected) {
+                if (!g.routed(le.first) || le.second < 0 || le.second >= g.n_experts)
+                    throw std::runtime_error("cache seed: invalid expert ID");
+                const size_t at = size_t(le.first * g.n_experts + le.second);
+                if (chosen[at]) throw std::runtime_error("cache seed: duplicate expert ID");
+                chosen[at] = true;
+                ++quotas[owners_[size_t(le.first)]];
+            }
+        }
         double tail_gib = 0;
         for (size_t i = 0; i < devices.size(); ++i) {
             Device device(devices[i]);
@@ -112,6 +146,11 @@ bool Ds41MoeRunner::init(const Ds41MoeGeom & g, Ds41BlobSource * source, const D
             const int64_t owned = std::count(owners_.begin(), owners_.end(), i) * g.n_experts;
             if (free <= reserve + stride) throw std::runtime_error("multi-GPU: insufficient free VRAM");
             slots[i] = std::min({cfg.slots, owned, int64_t((free - reserve) / stride)});
+            if (selected) {
+                if (quotas[i] > slots[i])
+                    throw std::runtime_error("cache seed: selection exceeds per-card VRAM capacity or --slots");
+                slots[i] = quotas[i];
+            }
             tail_gib += (owned - slots[i]) * double(source->blob_bytes()) / 1073741824.0;
         }
         if (tail_gib > cfg.arena_gib || tail_gib > cfg.max_arena_gib) {
@@ -127,17 +166,23 @@ bool Ds41MoeRunner::init(const Ds41MoeGeom & g, Ds41BlobSource * source, const D
             local.up_types.assign(size_t(g.n_layers), -1);
             local.down_types.assign(size_t(g.n_layers), -1);
             std::vector<std::pair<int32_t, int32_t>> ranked;
+            if (selected)
+                for (const auto & le : *selected)
+                    if (owners_[size_t(le.first)] == i) ranked.push_back(le);
             for (int64_t l = 0; l < g.n_layers; ++l) {
                 if (owners_[size_t(l)] != i) continue;
                 local.gate_types[size_t(l)] = g.gate_type(l);
                 local.up_types[size_t(l)] = g.up_type(l);
                 local.down_types[size_t(l)] = g.down_type(l);
-                for (int64_t e = 0; e < g.n_experts; ++e) ranked.emplace_back(int32_t(l), int32_t(e));
+                for (int64_t e = 0; e < g.n_experts; ++e)
+                    if (!selected || !chosen[size_t(l * g.n_experts + e)])
+                        ranked.emplace_back(int32_t(l), int32_t(e));
             }
             Ds41MoeConfig c = cfg;
             c.slots = slots[i];
             c.slot_gib = 0;
             c.defer_cache = c.no_cache = false;
+            if (selected && c.slots == 0) c.no_cache = true;
             c.arena_skip_resident = c.persistent_cache = true;
             c.arena_adapt = c.vram_lru = c.chunk_prestage = c.chunk_prefetch = false;
             c.threads = 1;
@@ -155,9 +200,23 @@ bool Ds41MoeRunner::init(const Ds41MoeGeom & g, Ds41BlobSource * source, const D
             const auto & tier = *shards_.back().tier;
             if (tier.file_tier() != 0 || tier.resident() + tier.arena_experts() != int64_t(ranked.size()))
                 throw std::runtime_error("multi-GPU shard did not cover every owned expert in VRAM or pinned RAM");
+            if (selected) {
+                if (tier.resident() != quotas[i])
+                    throw std::runtime_error("cache seed: allocator did not retain the exact selected quota");
+                for (const auto & le : ranked) {
+                    const bool expected = chosen[size_t(le.first * g.n_experts + le.second)];
+                    if (tier.resident(le.first, le.second) != expected ||
+                        (!expected && !tier.in_arena(le.first, le.second)))
+                        throw std::runtime_error("cache seed: selected residency/pinned-tail coverage mismatch");
+                }
+                std::fprintf(stderr, "cache seed CUDA%d: verified %lld exact selected experts, %llu physical bytes\n",
+                             devices[i], (long long) quotas[i],
+                             (unsigned long long) (uint64_t(quotas[i]) * stride));
+            }
             std::fprintf(stderr, "multi-GPU CUDA%d: %zu owned experts, %lld resident, %lld pinned, 0 file\n",
                          devices[i], ranked.size(), (long long) tier.resident(), (long long) tier.arena_experts());
         }
+        initialized_ = true;
         return true;
     } catch (const std::runtime_error & e) {
         error = e.what();
@@ -188,30 +247,36 @@ bool Ds41MoeRunner::dispatch(int64_t layer, const std::function<bool(Shard &)> &
 }
 
 bool Ds41MoeRunner::run(int64_t l, const int32_t * ids, const float * w, const float * x, float * out) {
+    route_profile.observe(l, 1, ids);
     if (!sharded()) return Ds41MoeTier::run(l, ids, w, x, out);
     return dispatch(l, [&](Shard & s) { return s.tier->run(l, ids, w, x, out); });
 }
 bool Ds41MoeRunner::run_multi(int64_t l, int n, const int32_t * ids, const float * w, const float * x, float * out) {
+    route_profile.observe(l, n, ids);
     if (!sharded()) return Ds41MoeTier::run_multi(l, n, ids, w, x, out);
     return dispatch(l, [&](Shard & s) { return s.tier->run_multi(l, n, ids, w, x, out); });
 }
 bool Ds41MoeRunner::run_chunk(int64_t l, int n, const int32_t * ids, const float * w, const float * x, float * out) {
+    route_profile.observe(l, n, ids);
     if (!sharded()) return Ds41MoeTier::run_chunk(l, n, ids, w, x, out);
     return dispatch(l, [&](Shard & s) { return s.tier->run_chunk(l, n, ids, w, x, out); });
 }
 bool Ds41MoeRunner::run_to_dev(int64_t l, const int32_t * ids, const float * w, const float * x,
                                void * out, const void * x_dev) {
+    route_profile.observe(l, 1, ids);
     if (!sharded()) return Ds41MoeTier::run_to_dev(l, ids, w, x, out, x_dev);
     return run_device(l, 1, ids, w, x, out, 0, x_dev);
 }
 bool Ds41MoeRunner::run_multi_to_dev(int64_t l, int n, const int32_t * ids, const float * w,
                                      const float * x, void * out) {
+    route_profile.observe(l, n, ids);
     if (!sharded()) return Ds41MoeTier::run_multi_to_dev(l, n, ids, w, x, out);
     if (n < 1 || n > kMaxMulti) return false;
     return run_device(l, n, ids, w, x, out, 1);
 }
 bool Ds41MoeRunner::run_chunk_dev(int64_t l, int n, const int32_t * ids, const float * w,
                                  const float * x, void * out) {
+    route_profile.observe(l, n, ids);
     if (!sharded()) return Ds41MoeTier::run_chunk_dev(l, n, ids, w, x, out);
     return run_device(l, n, ids, w, x, out, 2);
 }
@@ -274,6 +339,8 @@ void Ds41MoeRunner::release_chunk() {
             dispatch(int64_t(l), [](Shard & s) { s.tier->release_chunk(); return true; });
 }
 void Ds41MoeRunner::close() {
+    write_route_profile();
+    initialized_ = false;
 #ifdef DS41_HAVE_CUDA
     for (auto & s : shards_) {
         try {

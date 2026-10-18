@@ -46,6 +46,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <iostream>
@@ -63,6 +64,7 @@ namespace {
 
 struct Args {
     std::string model, ids_csv, ids_file, rank, dump_logits, dump_last;
+    std::string route_profile, cache_seed;
     std::string build_mirror;      // --build-mirror F [--mirror-gib N]: write the blob mirror (coldest experts by --rank) and exit
     double mirror_gib = 85.0;
     std::string prune;            // --prune F: "layer expert" lines (coldest first - v41_prune_list.py), soft or hard pruned
@@ -110,6 +112,14 @@ bool parse(int argc, char ** argv, Args & a) {
         if (k == "-m" || k == "--model") a.model = next();
         else if (k == "--ids") a.ids_csv = next();
         else if (k == "--ids-file") a.ids_file = next();
+        else if (k == "--route-profile") {
+            a.route_profile = next();
+            if (a.route_profile.empty()) return false;
+        }
+        else if (k == "--cache-seed") {
+            a.cache_seed = next();
+            if (a.cache_seed.empty()) return false;
+        }
         else if (k == "-n" || k == "--n-predict") a.n_predict = std::atoi(next().c_str());
         else if (k == "--backend") a.backend = next();
         else if (k == "--experts") a.experts = next();
@@ -169,6 +179,10 @@ bool parse(int argc, char ** argv, Args & a) {
     }
     if (a.chunk_batch && a.experts != "gpu") {
         std::fprintf(stderr, "ds41_generate: --chunk-batch requires --experts gpu\n");
+        return false;
+    }
+    if (!a.cache_seed.empty() && !a.rank.empty()) {
+        std::fprintf(stderr, "ds41_generate: --cache-seed and --rank are mutually exclusive\n");
         return false;
     }
     if ((a.backend == "cpu" || a.experts == "cpu") && a.expert_gpus != "auto") {
@@ -490,7 +504,28 @@ int main(int argc, char ** argv) {
                      a.prune_penalty > 0 ? ("penalised -" + std::to_string(a.prune_penalty)).c_str() : "masked out of routing", a.prune.c_str());
         mc.exclude = pruned;
     }
-    if (!tier.init(TG, source.get(), mc, expert_devices, a.vram_margin_gib, err)) {
+    std::vector<std::pair<int32_t,int32_t>> selected;
+    if (!a.route_profile.empty() || !a.cache_seed.empty()) {
+        try {
+            tier.route_profile.configure(TG, a.model, expert_devices);
+            if (!a.cache_seed.empty()) selected = tier.route_profile.read_seed(a.cache_seed);
+            if (!a.route_profile.empty()) {
+                for (const auto & input : {a.model, a.cache_seed, a.ids_file, a.rank})
+                    if (!input.empty() && std::filesystem::weakly_canonical(a.route_profile) ==
+                                          std::filesystem::weakly_canonical(input))
+                        throw std::runtime_error("route profile: output must not overwrite an input");
+                tier.route_profile_path = a.route_profile;
+                if (!tier.write_route_profile()) return 2;
+            } else {
+                tier.route_profile.prompt.clear();
+                tier.route_profile.decode.clear();
+            }
+        } catch (const std::exception & e) {
+            std::fprintf(stderr, "ds41_generate: %s\n", e.what()); return 2;
+        }
+    }
+    if (!tier.init(TG, source.get(), mc, expert_devices, a.vram_margin_gib, err,
+                   a.cache_seed.empty() ? nullptr : &selected)) {
         std::fprintf(stderr, "ds41_generate: tier init: %s\n", err.c_str()); return 1;
     }
     dense.set_oom_hook([&]() { return tier.release_prestage(); });   // a prompt pass that does not fit: prestage gives way
@@ -1399,6 +1434,7 @@ int main(int argc, char ** argv) {
                 apply_bias();
             }
             tier.rebalance_begin_prompt();
+            tier.route_profile.prefill = true;
             tier.reset_stats();
             if (const char* rl = std::getenv("STRATA_ROUTE_LOG")) {   // a turn marker for the route log (see ds41_moe.cpp)
                 if (FILE* f = std::fopen(rl, "a")) { std::fprintf(f, "# turn %d new %d %s\n", n_req, dh, by_step ? "passes" : "batch"); std::fclose(f); }
@@ -1570,6 +1606,8 @@ int main(int argc, char ** argv) {
                 }
             }
             tail_keep = 0;
+            tier.route_profile.prefill = false;
+            if (!tier.write_route_profile()) return 1;
             if (!ok) {
                 std::printf("ERR prefill failed: %s\n", ferr.c_str());
                 std::fflush(stdout);
@@ -1778,10 +1816,12 @@ int main(int argc, char ** argv) {
                              1.0 + (double) rq_acc / rq_pass, 1.0 + (double) sv_acc / std::max(1L, sv_pass));
 #endif
             tier.rebalance_tick(true);   // the gap until the next request: retire a large batch for the reader
+            if (!tier.write_route_profile()) return 1;
             std::printf("DONE %d %d %.1f %.1f %s 0 0 %d %lld %lld 0 %lld 0 %d\n", gen, total, prompt_ms, dec_ms, finish, reused,
                         (long long) st.hits, (long long) st.lookups(), (long long) st.file_tier, total - reused);
             std::fflush(stdout);
         }
+        if (!tier.write_route_profile()) std::_Exit(1);
         tier.close();
         // the stdin reader thread (detached) sits in getline holding cin's lock: a normal exit's stream teardown waits
         // on it until the client closes the pipe - leave without the static destructors
@@ -1812,6 +1852,7 @@ int main(int argc, char ** argv) {
     const int sp_tail = spec ? std::min<int>(128, (int) prompt.size() - 1) : 0;
     const bool prof_prefill = std::getenv("STRATA_PROFILE_PREFILL") != nullptr;
     if (prof_prefill) Ds41MoeTier::profiler(true);
+    tier.route_profile.prefill = true;
     const bool ok = feed(prompt.data(), (int) prompt.size() - dm_tail - sp_tail, 0, [&](int done) {
         if (!a.quiet) std::fprintf(stderr, "\rprompt %d/%zu", done, prompt.size());
     }, a.ppl || !a.dump_logits.empty() ? &all : nullptr);
@@ -1851,6 +1892,7 @@ int main(int argc, char ** argv) {
         apply_bias();
     }
 #endif
+    tier.route_profile.prefill = false;
     const double prompt_ms = now_ms() - tp0;
     if (defer_vram && dm_tail == 0 && !spec) {   // the prompt is done: its buffers go back, the VRAM expert cache opens into the free space
         if (!open_cache()) { std::fprintf(stderr, "ds41_generate: deferred seed: %s\n", err.c_str()); return 1; }
@@ -2073,5 +2115,5 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "\n");
     }
     tier.close();
-    return 0;
+    return tier.write_route_profile() ? 0 : 1;
 }

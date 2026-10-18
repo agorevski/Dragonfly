@@ -16,6 +16,63 @@ static void require(bool ok, const std::string & what) {
 }
 
 int main(int argc, char ** argv) {
+    {
+        Ds41RouteProfile profile;
+        profile.layers = 2; profile.experts = 3; profile.top_k = 2;
+        profile.prompt.assign(6, 0); profile.decode.assign(6, 0);
+        const int32_t ids[] = {2, 0, 1, 2};
+        profile.observe(1, 2, ids);
+        profile.prefill = false;
+        profile.observe(0, 1, ids);
+        require(profile.prompt == std::vector<uint64_t>({0,0,0,1,1,2}) &&
+                profile.decode == std::vector<uint64_t>({1,0,1,0,0,0}),
+                "profile separates token-major prefill and decode counts");
+        bool rejected = false;
+        const int32_t invalid[] = {-1, 0};
+        try { profile.observe(0, 1, invalid); } catch (const std::runtime_error &) { rejected = true; }
+        require(rejected, "profile rejects invalid expert IDs");
+        profile.decode[2] = UINT64_MAX;
+        rejected = false;
+        try { profile.observe(0, 1, ids); } catch (const std::runtime_error &) { rejected = true; }
+        require(rejected, "profile rejects count overflow");
+        const std::string path = ".ds41-profile-seed-test";
+        profile.metadata = "model abc 123\ngeometry 2 3 2 256 256\n";
+        {
+            std::ofstream out(path);
+            out << "DS41_SEED_V1\n" << profile.metadata << "select 1 2\nselect 0 0\n";
+        }
+        require(profile.read_seed(path) == std::vector<std::pair<int32_t,int32_t>>({{1,2},{0,0}}),
+                "exact seed order round trips");
+        {
+            std::ofstream out(path, std::ios::app);
+            out << "select 1 2\n";
+        }
+        rejected = false;
+        try { profile.read_seed(path); } catch (const std::runtime_error &) { rejected = true; }
+        require(rejected, "seed rejects duplicates");
+        {
+            std::ofstream out(path);
+            out << "DS41_SEED_V1\nmodel def 123\nselect 1 2\n";
+        }
+        rejected = false;
+        try { profile.read_seed(path); } catch (const std::runtime_error &) { rejected = true; }
+        require(rejected, "seed rejects incompatible identity");
+        for (const auto & body : {
+                profile.metadata,
+                profile.metadata + "select -1 0\n",
+                profile.metadata + "select 0 3\n",
+                profile.metadata + "select 0 0 extra\n",
+                profile.metadata + "select 0 0\ngeometry 2 3 2 256 256\n"}) {
+            {
+                std::ofstream out(path);
+                out << "DS41_SEED_V1\n" << body;
+            }
+            rejected = false;
+            try { profile.read_seed(path); } catch (const std::runtime_error &) { rejected = true; }
+            require(rejected, "seed rejects empty, out-of-bounds, trailing, or reordered data");
+        }
+        std::remove(path.c_str());
+    }
     std::vector<int> devices;
     std::string error;
     require(ds41_expert_devices("auto", 4, devices, error) && devices == std::vector<int>({0,1,2,3}), "auto selects all GPUs");
@@ -66,6 +123,34 @@ int main(int argc, char ** argv) {
     require(sharded.init(g, &source, cfg, devices, 1, error), error);
     require(sharded.resident() == 6 * count && sharded.arena_experts() == 2 * count &&
             sharded.file_tier() == 0, "disjoint resident and pinned coverage");
+    {
+        Ds41MoeRunner seeded;
+        std::vector<std::pair<int32_t,int32_t>> selection;
+        for (int l = 0; l < count - 1; ++l) selection.emplace_back(l, 7);
+        require(seeded.init(g, &source, cfg, devices, 1, error, &selection), error);
+        require(seeded.resident() == count - 1 &&
+                seeded.arena_experts() == 8 * count - (count - 1) && seeded.file_tier() == 0,
+                "explicit seed quotas include a zero-resident card and complete pinned tail");
+        for (int l = 0; l < count; ++l) for (int e = 0; e < 8; ++e)
+            require(seeded.resident(l, e) == (l < count - 1 && e == 7), "exact selected IDs resident");
+        const int32_t route[] = {7, 0};
+        const float w[] = {0.5f, 0.5f};
+        std::vector<float> input(size_t(g.n_embd), 0.02f), actual(size_t(g.n_embd)), baseline(size_t(g.n_embd));
+        for (int l = 0; l < count; ++l) {
+            require(seeded.run(l, route, w, input.data(), actual.data()) &&
+                    sharded.run(l, route, w, input.data(), baseline.data()), "seeded output execution");
+            require(actual == baseline, "exact seed preserves resident/pinned numeric output");
+        }
+        seeded.release_cache();
+        require(seeded.resident() == count - 1, "selected cache persists");
+        seeded.close();
+        selection.emplace_back(0, 7);
+        require(!seeded.init(g, &source, cfg, devices, 1, error, &selection), "duplicate seed rejected");
+        selection.clear();
+        for (int e = 0; e < 8; ++e) selection.emplace_back(0, e);
+        require(!seeded.init(g, &source, cfg, devices, 1, error, &selection) && !seeded.sharded(),
+                "explicit selection larger than per-card slots rejected");
+    }
     sharded.reset_stats();
     Ds41MoeRunner reference;
     require(reference.init(g, &source, cfg, {}, 1, error), error);
