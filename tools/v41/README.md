@@ -214,6 +214,44 @@ The batch kernel reuses the existing finite SwiGLU clamp and q8_1 activation
 quantizer, including FP32 scale selection, integer rounding and FP16 scale
 storage. It does not implement LoRA or tail-scale layouts.
 
+`STRATA_DS41_BATCH_FUSED_GU=1` additionally opts the batch kernel into a
+fused gate/up, SwiGLU and hidden-q8_1 launch. It requires `--chunk-batch`;
+without that flag it has no effect. Unset or `=0` keeps the original
+three-launch batch path. The fused path uses two launches: one CTA computes
+32 gate/up rows for up to four tokens, exchanges their clamped SwiGLU
+values in shared memory, and runs the existing q8_1 quantizer before the
+unchanged down kernel. This removes one launch and the global FP32
+gate/up writes and reads (36 KiB per routed token), but does not change
+scratch allocation, transfers, expert residency or decode.
+The same weight decoding, warp reduction order, explicitly rounded
+SwiGLU product and q8_1 scale/rounding rules are retained.
+The `ds41_batch` and `ds41_batch_fused_gu` CTests explicitly select off/on
+and compare all output floats and hidden q8_1 storage, including untouched
+entry guards, against grouped execution with nonzero synthetic weights.
+Do not infer end-to-end improvement from the removed memory operations;
+compare the same prompt and geometry with only this environment variable
+changed before enabling it for a workload.
+
+On physical GPU 0 (Quadro RTX 8000, SM75), Linux, GCC 13.3 and CUDA 13.4,
+the off/on CTests both passed with seed 7319, full-width nonzero synthetic
+weights and the cases below. All output floats and hidden q8_1 bytes were
+bitwise equal to grouped execution; mixed gate/up FP64 reference relative
+L2 errors were below `8.4e-8`. The two tests ran sequentially, not as an
+interleaved off/on experiment. Each test retained the five alternating
+grouped/batch pairs of ten launches described below.
+
+| Q2_K/Q2_K/Q3_K routed entries | Unfused batch median [min, max], ms | Fused batch median [min, max], ms |
+| --- | --- | --- |
+| 3 | 0.153 [0.153, 0.153] | 0.181 [0.180, 0.181] |
+| 15 | 0.530 [0.530, 0.531] | 0.567 [0.562, 0.571] |
+| 65 | 2.236 [1.888, 2.272] | 1.910 [1.851, 2.210] |
+| 257 | 7.502 [7.369, 7.657] | 7.498 [7.287, 7.929] |
+
+These measurements do **not** establish a general speedup: sparse groups
+regressed, the 65-entry ranges overlap, and the largest case was flat.
+The fused path remains experimental and off by default. No real-model
+throughput or quality comparison was run for this fusion.
+
 Synthetic checks on physical GPU 1, a Quadro RTX 8000 (SM75), Linux and CUDA
 13.4, used full 5120/2304 matrices, seed 7319 and no model weights. All output
 floats and hidden q8_1 bytes matched the grouped path exactly, including
