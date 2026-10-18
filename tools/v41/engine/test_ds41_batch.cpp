@@ -97,7 +97,7 @@ static void chunk_dispatch(const std::vector<uint8_t>& blobs, size_t bytes,
     }
 }
 
-static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng) {
+static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng, bool dispatch = true) {
     constexpr int H = 5120, FF = 2304, NG = 3;
     // One empty group, nonzero entry offset, unequal lengths, and nonidentity routing.
     const int count = 2 * per + 1, cap = count + 2, ntok = per + 2;
@@ -222,12 +222,13 @@ static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng) {
     launch(true);
     CK(cudaMemcpy(ref.data(), out.p, ref.size() * sizeof(float), cudaMemcpyDeviceToHost));
     REQUIRE(std::memcmp(ref.data(), got.data(), ref.size() * sizeof(float)) == 0);
-    if (oracle && gt == 10 && ut == 10) chunk_dispatch(blobs, L.bytes, inputs, ntok);
+    if (dispatch && oracle && gt == 10 && ut == 10) chunk_dispatch(blobs, L.bytes, inputs, ntok);
 }
 
 int main(int argc, char** argv) {
     const bool quick = argc == 2 && std::strcmp(argv[1], "--quick") == 0;
-    REQUIRE(argc == 1 || quick);
+    const bool probe = argc == 2 && std::strcmp(argv[1], "--probe") == 0;
+    REQUIRE(argc == 1 || quick || probe);
     int devices = 0;
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) return 77;
     cudaDeviceProp p;
@@ -257,6 +258,12 @@ int main(int argc, char** argv) {
     REQUIRE(k::native_expert_batch(L, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0, 0,
                                   nullptr, nullptr, nullptr, nullptr));
     std::mt19937 rng(7319);
+    if (probe) {
+        for (int gt : {10, 11})
+            for (int ut : {10, 11}) run(gt, ut, 9, true, rng, false);
+        std::puts("PASS: bounded mixed-format batch probe");
+        return 0;
+    }
     for (int per : {1, 3, 4, 7, 8, 9, 32, 128})
         if (!quick || per == 1 || per == 7 || per == 8 || per == 9)
             run(10, 10, per, per == 7, rng);
