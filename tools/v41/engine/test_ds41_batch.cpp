@@ -225,7 +225,9 @@ static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng) {
     if (oracle && gt == 10 && ut == 10) chunk_dispatch(blobs, L.bytes, inputs, ntok);
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const bool quick = argc == 2 && std::strcmp(argv[1], "--quick") == 0;
+    REQUIRE(argc == 1 || quick);
     int devices = 0;
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) return 77;
     cudaDeviceProp p;
@@ -237,6 +239,8 @@ int main() {
                 std::getenv("CUDA_VISIBLE_DEVICES") ? std::getenv("CUDA_VISIBLE_DEVICES") : "(unset)");
     std::printf("STRATA_DS41_BATCH_FUSED_GU=%s\n", std::getenv("STRATA_DS41_BATCH_FUSED_GU") ?
                 std::getenv("STRATA_DS41_BATCH_FUSED_GU") : "(unset; unfused)");
+    for (const char* name : {"STRATA_DS41_BATCH_COLS", "STRATA_DS41_BATCH_PAIR_GU"})
+        std::printf("%s=%s\n", name, std::getenv(name) ? std::getenv(name) : "(unset)");
     auto L = k::native_expert_layout(10, 11, 5120, 2304);
     auto bad = L; bad.n_embd = 2560;
     REQUIRE(!k::native_expert_batch_supported(bad));
@@ -253,7 +257,9 @@ int main() {
     REQUIRE(k::native_expert_batch(L, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0, 0,
                                   nullptr, nullptr, nullptr, nullptr));
     std::mt19937 rng(7319);
-    for (int per : {1, 3, 7, 32, 128}) run(10, 10, per, per == 7, rng);
+    for (int per : {1, 3, 4, 7, 8, 9, 32, 128})
+        if (!quick || per == 1 || per == 7 || per == 8 || per == 9)
+            run(10, 10, per, per == 7, rng);
     run(10, 11, 7, true, rng);
     run(11, 10, 7, true, rng);
     run(11, 11, 7, true, rng);
