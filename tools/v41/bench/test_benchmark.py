@@ -76,7 +76,7 @@ class BenchmarkTests(unittest.TestCase):
                     argv += ["--device-activations", "--tier-graph", "--dma-overlap",
                              "--disable-cuda-graphs", "--chunk-batch", "--fused-gu",
                              "--down-mode", "4", "--moe-device-input", "--moe-peer-output",
-                             "--batch-columns", "8", "--pair-gu",
+                             "--batch-columns", "8", "--batch-down-warps", "4", "--pair-gu",
                              "--prefill-graph-cache", "--prefill-row-cache", "--stage-mib", "256"]
                 if mode == "occupied-multi":
                     argv += ["--gpus", "0,3"]
@@ -96,6 +96,7 @@ class BenchmarkTests(unittest.TestCase):
                                                        "STRATA_DS41_PREFILL_ROW_CACHE": "stale",
                                                        "STRATA_DS41_BATCH_PAIR_GU": "stale",
                                                        "STRATA_DS41_BATCH_COLS": "stale",
+                                                       "STRATA_DS41_BATCH_DOWN_WARPS": "stale",
                                                        "MIMO_CHUNK_STAGE_MIB": "stale",
                                                        "STRATA_DS41_BATCH_FUSED_GU": "stale",
                                                        "STRATA_TIER_GRAPH": "stale",
@@ -115,6 +116,7 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertIn("--chunk-batch", result["command"])
                     self.assertEqual(result["environment"]["STRATA_EXP_MODE_T11"], "4")
                     self.assertEqual(result["environment"]["STRATA_DS41_BATCH_COLS"], "8")
+                    self.assertEqual(result["environment"]["STRATA_DS41_BATCH_DOWN_WARPS"], "4")
                     self.assertEqual(result["environment"]["MIMO_CHUNK_STAGE_MIB"], "256")
                 else:
                     self.assertIn("error", result)
@@ -128,6 +130,7 @@ class BenchmarkTests(unittest.TestCase):
                     if mode != "success":
                         self.assertIsNone(result["environment"]["STRATA_EXP_MODE_T11"])
                         self.assertIsNone(result["environment"]["STRATA_DS41_BATCH_COLS"])
+                        self.assertIsNone(result["environment"]["STRATA_DS41_BATCH_DOWN_WARPS"])
                         self.assertIsNone(result["environment"]["MIMO_CHUNK_STAGE_MIB"])
                     for name in ("STRATA_DS41_BATCH_FUSED_GU", "STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
                                  "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS",
@@ -163,7 +166,8 @@ class BenchmarkTests(unittest.TestCase):
         base = ["benchmark", "--engine", "engine", "--engine-revision", "test",
                 "--model", "model", "--config", "config", "--ids-file", "ids",
                 "--output", "unused"]
-        for flags in (["--batch-columns", "8"], ["--pair-gu"], ["--pair-gu", "--chunk-batch"]):
+        for flags in (["--batch-columns", "8"], ["--batch-down-warps", "4"],
+                      ["--pair-gu"], ["--pair-gu", "--chunk-batch"]):
             with mock.patch.object(sys, "argv", base + flags), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as error:
                     B.main()
