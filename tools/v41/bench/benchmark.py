@@ -114,12 +114,15 @@ def command(args):
 def run_protocol(args, ids, result):
     events = queue.Queue()
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("STRATA_", "DS41_", "GGML_"))}
+           if not k.startswith(("STRATA_", "DS41_", "GGML_", "MIMO_"))}
     env["CUDA_VISIBLE_DEVICES"] = args.gpus
     env["STRATA_V41_CONFIG"] = str(args.config)
     if args.step_max is not None:
         env["STRATA_SERVE_STEP_MAX"] = str(args.step_max)
     switches = {
+        "STRATA_DS41_PREFILL_GRAPH_CACHE": args.prefill_graph_cache,
+        "STRATA_DS41_PREFILL_ROW_CACHE": args.prefill_row_cache,
+        "STRATA_DS41_BATCH_PAIR_GU": args.pair_gu,
         "STRATA_MOE_DEVICE_INPUT": args.moe_device_input,
         "STRATA_MOE_PEER_OUTPUT": args.moe_peer_output,
         "STRATA_DS41_BATCH_FUSED_GU": args.fused_gu,
@@ -133,12 +136,18 @@ def run_protocol(args, ids, result):
             env[name] = "1"
     if args.down_mode is not None:
         env["STRATA_EXP_MODE_T11"] = str(args.down_mode)
+    if args.batch_columns is not None:
+        env["STRATA_DS41_BATCH_COLS"] = str(args.batch_columns)
+    if args.stage_mib is not None:
+        env["MIMO_CHUNK_STAGE_MIB"] = str(args.stage_mib)
     result["environment"] = {"CUDA_VISIBLE_DEVICES": args.gpus,
                              "STRATA_V41_CONFIG": str(args.config),
                              "STRATA_SERVE_STEP_MAX": env.get("STRATA_SERVE_STEP_MAX"),
                              **{name: env.get(name) for name in switches},
                              "STRATA_EXP_MODE_T11": env.get("STRATA_EXP_MODE_T11"),
-                             "engine_overrides": "all other STRATA_*, DS41_*, GGML_* removed"}
+                             "STRATA_DS41_BATCH_COLS": env.get("STRATA_DS41_BATCH_COLS"),
+                             "MIMO_CHUNK_STAGE_MIB": env.get("MIMO_CHUNK_STAGE_MIB"),
+                             "engine_overrides": "all other STRATA_*, DS41_*, GGML_*, MIMO_* removed"}
     start = time.monotonic()
     process = subprocess.Popen(result["command"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -282,6 +291,16 @@ def main():
                         help="opt in to fused gate/up activation and quantization; requires --chunk-batch")
     parser.add_argument("--down-mode", type=int, choices=(0, 1, 2, 4),
                         help="explicit Q3_K down-projection row/warp layout")
+    parser.add_argument("--batch-columns", type=int, choices=(4, 8),
+                        help="explicit expert batch tile width; requires --chunk-batch")
+    parser.add_argument("--pair-gu", action="store_true",
+                        help="share gate/up activation loads; requires --chunk-batch --fused-gu")
+    parser.add_argument("--prefill-graph-cache", action="store_true",
+                        help="cache bounded prefill init/finish graphs")
+    parser.add_argument("--prefill-row-cache", action="store_true",
+                        help="reuse column-local prefill row maps across layers")
+    parser.add_argument("--stage-mib", type=int, choices=(32, 64, 128, 256, 512),
+                        help="per-half chunk expert staging MiB; actual allocation may be capped")
     parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
     parser.add_argument("--moe-device-input", action="store_true",
                         help="keep sharded decode activations on devices; requires --device-activations")
@@ -303,6 +322,10 @@ def main():
         parser.error("--fused-gu requires --chunk-batch")
     if args.moe_device_input and not args.device_activations:
         parser.error("--moe-device-input requires --device-activations")
+    if args.batch_columns is not None and not args.chunk_batch:
+        parser.error("--batch-columns requires --chunk-batch")
+    if args.pair_gu and not (args.chunk_batch and args.fused_gu):
+        parser.error("--pair-gu requires --chunk-batch --fused-gu")
     gpu_ids = args.gpus.split(",")
     if any(not item.isdigit() for item in gpu_ids) or len(set(map(int, gpu_ids))) != len(gpu_ids):
         parser.error("--gpus must list distinct nonnegative physical GPU ordinals")
