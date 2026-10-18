@@ -53,6 +53,7 @@ engine defaults:
 | Control | Requirement and scope |
 | --- | --- |
 | `--batch-columns 8` | Eight-column expert weight-reuse tiles; requires `--chunk-batch`. |
+| `--batch-down-warps 4` | Four-warp down-projection CTAs instead of eight; requires `--chunk-batch`. |
 | `--pair-gu` | Reuse activation loads for gate/up; requires `--chunk-batch --fused-gu`. |
 | `--prefill-graph-cache` | Bounded init/finish graph cache, independent of CUDA graph capture. |
 | `--prefill-row-cache` | Reuse column-local prefill row maps across layers. |

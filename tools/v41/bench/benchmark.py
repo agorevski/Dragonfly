@@ -138,6 +138,8 @@ def run_protocol(args, ids, result):
         env["STRATA_EXP_MODE_T11"] = str(args.down_mode)
     if args.batch_columns is not None:
         env["STRATA_DS41_BATCH_COLS"] = str(args.batch_columns)
+    if args.batch_down_warps is not None:
+        env["STRATA_DS41_BATCH_DOWN_WARPS"] = str(args.batch_down_warps)
     if args.stage_mib is not None:
         env["MIMO_CHUNK_STAGE_MIB"] = str(args.stage_mib)
     result["environment"] = {"CUDA_VISIBLE_DEVICES": args.gpus,
@@ -146,6 +148,7 @@ def run_protocol(args, ids, result):
                              **{name: env.get(name) for name in switches},
                              "STRATA_EXP_MODE_T11": env.get("STRATA_EXP_MODE_T11"),
                              "STRATA_DS41_BATCH_COLS": env.get("STRATA_DS41_BATCH_COLS"),
+                             "STRATA_DS41_BATCH_DOWN_WARPS": env.get("STRATA_DS41_BATCH_DOWN_WARPS"),
                              "MIMO_CHUNK_STAGE_MIB": env.get("MIMO_CHUNK_STAGE_MIB"),
                              "engine_overrides": "all other STRATA_*, DS41_*, GGML_*, MIMO_* removed"}
     start = time.monotonic()
@@ -293,6 +296,8 @@ def main():
                         help="explicit Q3_K down-projection row/warp layout")
     parser.add_argument("--batch-columns", type=int, choices=(4, 8),
                         help="explicit expert batch tile width; requires --chunk-batch")
+    parser.add_argument("--batch-down-warps", type=int, choices=(4, 8),
+                        help="explicit expert down-projection block geometry; requires --chunk-batch")
     parser.add_argument("--pair-gu", action="store_true",
                         help="share gate/up activation loads; requires --chunk-batch --fused-gu")
     parser.add_argument("--prefill-graph-cache", action="store_true",
@@ -324,6 +329,8 @@ def main():
         parser.error("--moe-device-input requires --device-activations")
     if args.batch_columns is not None and not args.chunk_batch:
         parser.error("--batch-columns requires --chunk-batch")
+    if args.batch_down_warps is not None and not args.chunk_batch:
+        parser.error("--batch-down-warps requires --chunk-batch")
     if args.pair_gu and not (args.chunk_batch and args.fused_gu):
         parser.error("--pair-gu requires --chunk-batch --fused-gu")
     gpu_ids = args.gpus.split(",")
