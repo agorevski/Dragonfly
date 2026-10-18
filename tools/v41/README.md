@@ -51,7 +51,7 @@ build uses `-DSTRATA_DS41_CUDA=OFF`. The build fetches a pinned llama.cpp
 source archive for ggml, not model weights. To use an existing compatible
 llama.cpp checkout instead, pass
 `-DSTRATA_DS41_GGML_DIR=/path/to/llama.cpp`.
-Set `CMAKE_BUILD_PARALLEL_LEVEL=2` when building to bound the separate stock
+Set `STRATA_DS41_CUDA_BUILD_JOBS=2` when configuring to bound the separate stock
 CUDA backend build as well as using `--parallel 2` for the add-on targets.
 
 The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
@@ -60,14 +60,81 @@ The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
 the normal Strata engine's backend settings.
 
 The engine's default `--slots auto` sizes uniform Q2_K/Q3_K expert caches
-against the free-VRAM budget, including slot alignment. With batched
+against the free-VRAM budget, including slot alignment. On the single-GPU path, with batched
 prefill, allocation is deferred until the prompt buffers are released.
 If the automatic budget has no room, decode uses the RAM/file tiers
 without a VRAM expert cache. An explicit `--slots N` remains a manual
 capacity choice; it must fit the available VRAM.
 
+## Supported multi-GPU generation and serving
+
+**DS41 CUDA defaults to `--expert-gpus auto`: all CUDA-visible GPUs.** The
+launcher uses the same default. One visible card uses the original single-GPU
+tier. To keep that path on a multi-GPU machine, pass `--expert-gpus 0`; to
+choose physical cards, set `CUDA_VISIBLE_DEVICES` before launch. IDs in
+`--expert-gpus 0,1,2,3` refer to that visible list, not physical ordinals.
+The separate Strata/Qwen installer and its defaults are unchanged.
+
+This is the production layer-sharded runner adapted from Xolotl, not the
+older all-resident prototype below. Dense attention, Engram and KV stay on
+CUDA0. Contiguous expert-layer ranges execute on their owning GPUs. Each
+owner keeps a persistent VRAM cache and pins only its nonresident experts
+in host RAM. Every expert must fit in that union: initialization reports
+the counts on each card and rejects an uncovered/file-tier tail.
+Small routed outputs are copied back and synchronized before dense uses them.
+This is capacity sharing, not concurrent tensor parallelism.
+
+The standard checkpoint's **Q2_K gate/up plus Q3_K down** is supported.
+Layer formats must be uniform across the model; per-expert mixed formats
+and pruning are rejected. `--arena-gib` caps the **total** pinned tail across
+the selected cards, while an explicit `--slots N` caps each card's cache.
+`--vram-margin` must be at least 1 GiB and reserves prompt/workspace room
+on every selected GPU; start with 2 GiB and a 4096-token context.
+More context or larger prompt batches can require a larger margin.
+The implementation retains a 40 GiB MemAvailable floor while building arenas.
+
+For multi-GPU, omitted PCIe/prediction settings become `--pcie 1 --pf-b 0`;
+incompatible explicit values fail instead of silently selecting a different
+execution mode. Caches stay resident across prefill and repeated requests;
+adaptive eviction, streaming prefetch and CPU expert execution are not used.
+The normal routing-bias defaults are unchanged; use `--route-bias 0
+--route-bias-file 0` for exact-routing comparisons. Real DSpark with multi-GPU
+is not validated and is explicitly rejected. CPU execution remains available
+with `--backend cpu --experts cpu` (or launcher `--backend cpu`).
+
+```sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 python tools/v41/serve/launch.py \
+  --engine build-ds41/ds41_generate \
+  --model /path/to/model-00001-of-00010.gguf \
+  --config /path/to/config.json --tokenizer /path/to/v41-tokenizer \
+  --expert-gpus auto \
+  --engine-arg=--vram-margin --engine-arg=2 \
+  --engine-arg=--arena-gib --engine-arg=64 \
+  --engine-arg=--prompt-batch --engine-arg=32 \
+  --engine-arg=--prefill-chunk --engine-arg=16
+```
+
+Linux x86-64 NVIDIA CUDA is the supported backend for this runner.
+Two- and four-device nonzero synthetic tests cover the mixed-format resident
+and pinned paths, cross-device outputs, independent consumer streams,
+changed inputs and lifecycle. Reserve the cards before running
+`CUDA_VISIBLE_DEVICES=0,1,2,3 build-ds41/test_ds41_runner --cuda`;
+this explicit multi-card test is not run by ordinary CTest.
+Checkpoint timings and Nsight evidence are recorded in the
+[benchmark report](bench/RESULTS.md#supported-four-gpu-runtime-and-profile).
+On the local four-card system, the same-build 128-input / 32-output Q2_K
+comparison measured 56.816 prefill and 21.917 decode tok/s, versus 3.107
+and 0.852 on one card, with identical output IDs and zero runtime file routes.
+Startup increased from 35.3 to 80.2 seconds; these are short local samples,
+not a general throughput guarantee. OpenAI and Anthropic serving also passed
+a real four-card smoke check.
+Other GPU architectures, heterogeneous
+capacity balancing and long-context/concurrent serving are not established
+by the local four-Quadro-RTX-8000 measurements.
+
 ## Experimental multi-GPU expert capacity prototype
 
+This earlier diagnostic remains separate from the supported runner above.
 `STRATA_DS41_MGPU=ON` builds a separate resident-layer expert runner. It is
 off by default, is not linked into `ds41_generate`, and does **not** enable
 multi-GPU generation or serving. No checkpoint was loaded for its validation.
@@ -350,7 +417,8 @@ storage. No default changed.
 The combined CPU suite passed 10/10 and the CUDA suite 19/19. See
 [the benchmark report](bench/RESULTS.md#integrated-roadmap-checkpoint-comparison)
 for exact settings, build revision, commands, results and limitations. This
-does not validate real DSpark speculation or multi-GPU checkpoint generation.
+single-GPU checkpoint does not validate real DSpark speculation or multi-GPU
+generation; the later supported multi-GPU results are linked above.
 
 ## Serve through the isolated adapter
 
@@ -402,7 +470,8 @@ separate arguments, for example
 
 The adapter supports text and completed tool calls, including streaming
 OpenAI and Anthropic responses. It rejects unsupported forced tool choice,
-vision, multi-GPU serving, penalties and logit bias. Incremental tool
+vision, penalties and logit bias. Multi-GPU uses the same isolated process
+and token protocol as single-GPU. Incremental tool
 argument deltas, batching and session persistence are not implemented.
 
 ## DSpark readiness (optional, off by default)
@@ -476,10 +545,10 @@ The source checkout is not modified by this add-on.
 This is an experimental Linux x86-64 CPU/NVIDIA path. It does not establish Windows,
 AMD HIP, Intel SYCL or Apple Metal support, nor does it establish
 reference-logit equivalence, model quality or throughput on this machine.
-Multi-GPU operation and optional speculative/fused paths should not be
-inferred from Strata's support for those features on its Qwen models.
+Multi-GPU support is the explicitly documented DS41 layer-sharded path above,
+not Strata's Qwen pipeline or its optional speculative/fused paths.
 
-## Validation on this machine
+## Original single-GPU port validation on this machine
 
 Checked on Linux, CUDA 13.4, one Quadro RTX 8000 (48 GiB, SM75) selected with
 `CUDA_VISIBLE_DEVICES=0`, and 251 GiB system RAM. The machine has four GPUs,
@@ -518,7 +587,8 @@ arguments on the launcher. The normal Strata engine is not affected.
 
 These are short loading/generation and API compatibility checks, not model
 quality, long-context, throughput or reference-logit benchmarks. Real-model
-tool calling, DSpark, fused ggml operations and multi-GPU were not validated.
+tool calling, DSpark, fused ggml operations and multi-GPU were not validated
+in these original smoke checks; subsequent multi-GPU evidence is linked above.
 HIP, SYCL and Metal were not built because the add-on does not support them;
 their existing Strata sources were left unchanged.
 

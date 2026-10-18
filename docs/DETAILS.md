@@ -13,7 +13,10 @@ New here? Start with the [README](../README.md); installing step by step is in [
 ## DeepSeek V4.1 Flash 1017 (opt-in)
 
 The [experimental port](../tools/v41/README.md) is a standalone engine under `tools/v41/` with its own serving
-adapter, for Linux x86-64 CPU or one NVIDIA CUDA GPU only. Vision and multi-GPU serving are unsupported.
+adapter, for Linux x86-64 CPU or NVIDIA CUDA. DS41 CUDA defaults to all visible GPUs:
+`--expert-gpus auto` keeps dense/KV on CUDA0 and shards expert layers across the cards, with persistent
+VRAM caches and a disjoint pinned host tail. `--expert-gpus 0` preserves single-GPU execution.
+Vision and multi-GPU DSpark are unsupported. See the port's benchmark report for four-GPU measurements.
 The root CMake hook `STRATA_ENABLE_DS41` is **OFF** by default; CUDA targets additionally need
 `STRATA_DS41_CUDA=ON`. The normal `src/`, `include/`, `serve/` and `setup.py` paths are unchanged,
 and setup has no DeepSeek family. Use the add-on's build and launch instructions, not Qwen server settings.

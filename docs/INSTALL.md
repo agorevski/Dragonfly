@@ -20,7 +20,9 @@ There are three ways to install it. Take the first one unless you have a reason 
 > **DeepSeek V4.1 Flash 1017 is a separate, opt-in experiment.** Follow
 > [tools/v41/README.md](../tools/v41/README.md) for its standalone engine build and isolated serving adapter,
 > not the normal setup flow below. `setup.py` has no DeepSeek family. The port targets Linux x86-64 with CPU
-> or one NVIDIA CUDA GPU only; vision and multi-GPU serving are unsupported. Its Q2_K GGUF input from
+> or NVIDIA CUDA. DS41 CUDA defaults to all visible GPUs (`--expert-gpus auto`), with supported
+> layer-sharded generation and isolated serving; `--expert-gpus 0` keeps single-GPU mode. Vision is unsupported.
+> Its Q2_K GGUF input from
 > [mrfakename](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF) is 10 shards (~247 GiB);
 > obtain the matching config and tokenizer from
 > [the original model](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017), not raw safetensors as engine input.

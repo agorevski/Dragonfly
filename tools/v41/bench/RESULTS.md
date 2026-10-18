@@ -1,7 +1,9 @@
 # Bounded local measurements, 2026-10-18
 
-These are five serial process runs, seven complete requests, not a tuning sweep
-or a quality evaluation. No defaults changed. No weights were downloaded.
+The initial single-GPU measurements below are five serial process runs, seven
+complete requests, not a tuning sweep or a quality evaluation. They did not
+change defaults. The later supported four-GPU section records the new DS41
+CUDA default and its same-build comparison. No weights were downloaded.
 
 ## Hardware and inputs
 
@@ -179,3 +181,145 @@ Raw evidence is under the integration worktree's `build-roadmap-real/`, with
 `stdout.log` and `stderr.log`. The session artifact
 `files/validate_integrated_baseline.py` records the exact serial invocation
 and fails on any output-ID mismatch. These local artifacts are not committed.
+
+## Supported four-GPU runtime and profile
+
+The production layer-sharded runner at `54b6dd31fcda7367686f475c66deed57a9ed0547`
+defaults to `--expert-gpus auto`. This selects all CUDA-visible cards for DS41;
+one visible card retains the original tier. Core Strata/Qwen defaults and its
+installer are unchanged. This is real checkpoint generation, not the earlier
+synthetic multi-GPU prototype.
+
+### Same-build comparison
+
+Both processes used the same executable, SHA256
+`1bcc184fdf50963f69362c9915ad11210396cb90150f97809f54f30c877e60e1`,
+and the same 128 input IDs and 32 output IDs as the original `auto128` reference.
+The four-card machine has four Quadro RTX 8000 48 GiB cards, PCIe Gen3 x16,
+NVLink pairs 0/1 and 2/3, and cross-pair NODE connectivity. CPU, RAM, checkpoint,
+config and tokenizer are unchanged. The private Release build uses GCC 13.3,
+CUDA 13.4 and SM75. All runs were serialized; no other model occupied the GPUs.
+
+Common settings: auto slots, 64 GiB global arena cap, 2 GiB VRAM margin per
+device, batch 32 / chunk 16, step cutoff 0, context 4096, eight threads, PCIe
+fraction 1, prediction prefetch 0, temperature 0, seed 1, routing biases 0,
+no pruning, no prefix reuse, no DSpark and eager ggml CUDA. Chunk-batch,
+device-activation, tier-graph and DMA-overlap opt-ins were not enabled.
+Each process had a 600-second deadline and 40 GiB MemAvailable floor.
+
+| GPUs / process state | Startup s | TTFT s | Prefill tok/s | Decode tok/s | Decode VRAM hits | Decode file routes | Request storage read GiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU0 / cold | 35.311 | 47.117 | 3.107 | 0.852 | 1,773 / 7,440 | 4,843 | 133.804 |
+| GPU0-3 / cold | 80.222 | 2.254 | 56.816 | 21.917 | 7,193 / 7,440 | 0 | 0 |
+| GPU0-3 / warm | same process | 1.953 | 65.567 | 21.846 | 7,193 / 7,440 | 0 | 0 |
+
+The cold-request comparison is **18.3x prefill and 25.7x decode** on this
+machine. Decode counts 31 steps for 32 emitted tokens. TTFT excludes process
+startup. Warm repeats redo full prefill, without prompt reuse. All three
+requests retained exactly the original baseline's 32 generated IDs.
+These are ordered short single samples plus one warm repeat, not a tuning
+sweep or a general quality/numerical-equivalence result.
+
+The difference is residency, not four-way simultaneous matrix computation:
+dense attention, Engram and KV stay on CUDA0, while contiguous expert-layer
+ranges execute on their owning cards. This run placed 14,868 of 15,360
+experts in VRAM and the remaining 492 in a 5.9 GiB pinned arena, with no file
+tier. Resident/pinned counts were 3,529/311 on GPU0, 3,780/60 on GPU1,
+3,780/60 on GPU2 and 3,779/61 on GPU3. Decode had 247 pinned PCIe misses,
+zero CPU routes and zero file routes. Initialization still reads and uploads
+weights: zero request storage reads does not mean zero startup I/O.
+
+Peak sampled process RSS was 69.654 GiB for single GPU and 9.954 GiB for four
+GPUs; minimum MemAvailable was 178.014 and 238.459 GiB respectively. This is
+process/host instrumentation, not a measurement of total GPU allocation.
+Automatic slot counts can vary slightly with free VRAM and profiler overhead.
+
+### Nsight Systems evidence
+
+A separate four-GPU one-shot 128-input / 32-output run was captured with
+Nsight Systems 2026.3.2, CUDA and OS runtime tracing, no CPU sampling and no
+context-switch sampling. It also produced the same 32 output IDs. Under
+tracing, prefill was 54.0 tok/s and decode 17.54 tok/s; use the unprofiled
+protocol table above for throughput comparisons, not the instrumented run.
+
+The capture includes startup. Whole-process copy totals are dominated by
+initial cache seeding and must not be presented as decode traffic. To exclude
+that upload, the SQLite summary selects kernels and transfers starting at the
+first `native_gu_kernel` launch (81.326 seconds into the trace). The last
+kernel ends 3.998 seconds later. This approximate forward-only window omits
+the first layer's earlier dense work; it is not a separately marked decode
+range.
+
+| CUDA device | Kernel launches in forward window | Summed GPU kernel time ms |
+| --- | ---: | ---: |
+| 0 | 221,427 | 1,254.425 |
+| 1 | 2,059 | 413.533 |
+| 2 | 1,984 | 406.519 |
+| 3 | 1,990 | 419.267 |
+
+All four devices executed real kernels. Native Q2_K gate/up took 895.776 ms
+over 1,640 launches; native Q3_K down took 695.552 ms over 1,640 launches.
+Together they account for about 63.8% of summed kernel time. Other leading
+kernels were ggml Q2_K matrix-vector (230.232 ms), Q2_K matrix-matrix
+(110.960 ms) and flash attention (36.573 ms).
+
+The same window recorded 8,881 host-to-device copies, 7,861,744,860 bytes and
+671.469 ms, plus 5,756 device-to-host copies (29.336 ms) and 22,290 copies
+classified by CUDA as device-to-device (25.593 ms). These include staging and
+dense work, not just expert payload. Host-side `cudaStreamSynchronize` took
+2,314.533 ms over 9,049 calls; kernel launches took 774.775 ms over 227,141
+calls. API durations include waiting for GPU work and are not additive to
+kernel/copy durations.
+
+This supports further investigation of expert kernels, pinned-tail transfers,
+small-launch overhead and synchronization now that runtime file I/O is gone.
+It does not establish the gain from any proposed fusion, overlap or graph
+change, and does not justify enabling those separate opt-ins by default.
+
+### Serving, validation and reproduction
+
+The isolated HTTP adapter at `6bb676f8` accepts the production multi-GPU
+configuration without injecting Qwen pipeline arguments. A real launcher run
+on all four cards omitted `--expert-gpus`, `--pcie` and `--pf-b`, exercising
+their defaults. On loopback, health reported the model loaded, an OpenAI
+chat completion returned `4`, and an Anthropic SSE response returned `hello`
+and ended with `message_stop`. Both model and HTTP processes exited afterward.
+This is a serial smoke check, not a concurrency or long-context qualification.
+
+CPU CTest passed 11/11 and CUDA CTest passed 20/20. Explicit
+`CUDA_VISIBLE_DEVICES=0,1,2,3 build-roadmap-cuda/test_ds41_runner --cuda` and
+the two-card physical 2/3 counterpart passed nonzero mixed Q2_K/Q3_K resident
+and pinned references, cross-device output ordering and lifecycle checks.
+The adapter/frontend/detokenizer unittest command listed above passed again
+after the HTTP fix: 44 ran, five optional-tokenizer skips.
+
+Reproduce each protocol case using the input JSON from the original `auto128`
+artifacts and the corresponding physical mask (`0` or `0,1,2,3`):
+
+```sh
+python tools/v41/bench/benchmark.py \
+  --engine build-roadmap-cuda/ds41_generate --engine-revision 54b6dd31 \
+  --model /path/to/model-00001-of-00010.gguf --config /path/to/config.json \
+  --ids-file /path/to/prompt-128.json --gpus 0,1,2,3 --expert-gpus auto \
+  --slots auto --arena-gib 64 --vram-margin 2 --prompt-batch 32 \
+  --chunk 16 --step-max 0 --output-tokens 32 --timeout 600 \
+  --disable-cuda-graphs --repeats 2 --output /path/to/fresh-output
+
+nsys stats --report cuda_gpu_kern_sum,cuda_gpu_mem_time_sum,cuda_api_sum \
+  --format csv --output /path/to/nsys-stats /path/to/four-nsys.nsys-rep
+```
+
+Persistent evidence is in the integration worktree's `build-mgpu-real/`:
+`summary.json`, `single/` and `four/` result JSON/logs, `nsys-command.json`
+(exact profiler argv/environment), `four-nsys.nsys-rep`, its exported SQLite,
+CSV summaries, `nsys-forward-summary.json` and `http/` request/config/log
+artifacts. Session scripts `files/profile_mgpu_baseline.py` and
+`files/check_mgpu_http.py` record the bounded serial commands and assertions.
+Large profiles and checkpoint artifacts are not committed.
+
+Supported here means the isolated Linux NVIDIA CUDA runner and adapter,
+including the standard uniform-layer Q2_K gate/up plus Q3_K down checkpoint.
+Other architectures, heterogeneous capacity balancing, long contexts,
+concurrent serving, real DSpark and HIP/SYCL/Metal are not established by these
+four-identical-card results. Insufficient VRAM-plus-pinned coverage fails
+explicitly rather than falling back to file-tier generation.

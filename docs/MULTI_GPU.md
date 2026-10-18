@@ -1,5 +1,12 @@
 # Strata on two or more GPUs (layer split)
 
+> **DeepSeek V4.1 Flash 1017:** its separate engine now defaults to all visible CUDA GPUs
+> (`--expert-gpus auto`), with supported layer-sharded expert generation and isolated serving.
+> Dense/KV stays on CUDA0; this is not the Qwen pipeline described below. Use
+> `--expert-gpus 0` to retain single-GPU mode. Follow the
+> [DS41 guide](../tools/v41/README.md#supported-multi-gpu-generation-and-serving) for build,
+> pinned-RAM/VRAM requirements, supported formats, commands and profiling results.
+
 One model can run across several NVIDIA cards in one PC. The layers are split into contiguous ranges, one per GPU:
 the first card runs layers 0 to K-1, the next card runs K onward, and so on; the last card also runs the output head
 and the draft (MTP) layer. Each card keeps an expert cache for **its own layers only**, so two cards hold about twice
