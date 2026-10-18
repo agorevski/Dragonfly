@@ -1,6 +1,39 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">🪶 Dragonfly (Libellule)</h1>
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · **Français** · [Español](README.es.md) · [Português](README.pt-BR.md)
+
+<p align="center"><b>Précision à la frontière de Pareto</b><br>
+Un fork de Strata aggressivement optimisé pour DeepSeek V4.1 Flash 1017 · Repousser les limites de la performance d'inférence</p>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly à la frontière de Pareto"></p>
+
+## Qu'est-ce que Dragonfly ?
+
+**Dragonfly est DeepSeek V4.1 Flash 1017 à la frontière de Pareto.**
+
+Les libellules ne volent pas par la force brute. Elles volent avec quatre paires d'ailes contrôlées indépendamment, effectuant des micro-ajustements constants avec une énergie minimale. Dragonfly applique le même principe à l'inférence : se spécialiser agressivement, contrôler l'exécution avec précision, éliminer les gaspillages, extraire une performance maximale.
+
+### Philosophie de conception
+
+- **Spécialisé, pas générique.** Chaque optimisation cible l'architecture exacte et les modèles d'exécution de DeepSeek V4.1 Flash 1017.
+- **Précis, pas puissant.** Quatre surfaces de contrôle indépendantes (exécution, mémoire, planification, matériel) finement réglées plutôt qu'un seul outil émoussé.
+- **À la limite.** Échanger la flexibilité contre la performance pour atteindre la frontière de Pareto – le point où vous ne pouvez pas améliorer une métrique sans en sacrifier une autre.
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **Optimisé pour** | DeepSeek V4.1 Flash 1017 uniquement | Plusieurs modèles |
+| **Philosophie de conception** | Précision spécialisée | Flexibilité générique |
+| **Cas d'usage** | Débit/latence maximums sur un modèle | Support large matériel & modèles |
+| **Quantification fusionnée** | ✅ Oui | ❌ Non |
+| **Réglage de résidence expert** | ✅ Calibré & mesuré | ❌ Non |
+| **Remplacement clé en main** | ❌ Non | ✅ Oui |
+
+**Utilisez Strata si** vous avez besoin de support multi-modèles ou de large compatibilité matérielle.
+**Utilisez Dragonfly si** vous voulez une performance maximale sur DeepSeek V4.1 Flash 1017.
+
+---
 
 <p align="center"><b>Faites tourner un modèle d'IA de 125 milliards de paramètres sur votre propre PC de jeu</b><br>
 Carte graphique NVIDIA ou AMD (12 Go ou plus) · Windows ou Linux · gratuit et open source</p>

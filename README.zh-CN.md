@@ -1,6 +1,39 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">🪶 Dragonfly（蜻蜓）</h1>
 
 [English](README.md) · **简体中文** · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
+
+<p align="center"><b>在帕累托前沿上实现精度</b><br>
+为 DeepSeek V4.1 Flash 1017 优化的 Strata fork · 推动推理性能的边界</p>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly 在帕累托前沿上飞行"></p>
+
+## Dragonfly 是什么？
+
+**Dragonfly 是 DeepSeek V4.1 Flash 1017 在帕累托前沿的实现。**
+
+蜻蜓不靠蛮力飞行。它们用四对独立可控的翅膀，进行不断的微调，消耗最少的能量。Dragonfly 对推理应用同样的原则：主动专化、精确控制执行、消除浪费、提取最大性能。
+
+### 设计理念
+
+- **专化而非通用。** 每一项优化都针对 DeepSeek V4.1 Flash 1017 的精确架构和执行特性。
+- **精确而非蛮力。** 四个独立控制面（执行、内存、调度、硬件）精细调优，而非一个钝工具。
+- **在前沿。** 用灵活性换性能，到达帕累托前沿——无法改进一个指标而不牺牲另一个的点。
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **优化对象** | 仅 DeepSeek V4.1 Flash 1017 | 多个模型 |
+| **设计理念** | 专化精度 | 通用灵活性 |
+| **用途** | 单模型最大吞吐量/延迟 | 广泛硬件和模型支持 |
+| **融合量化** | ✅ 是 | ❌ 否 |
+| **专家驻留调优** | ✅ 校准且测量 | ❌ 否 |
+| **即插即用** | ❌ 否 | ✅ 是 |
+
+**使用 Strata 如果** 你需要多模型支持或广泛的硬件兼容性。
+**使用 Dragonfly 如果** 你想要 DeepSeek V4.1 Flash 1017 上的最大性能。
+
+---
 
 <p align="center"><b>在你自己的游戏电脑上运行 1250 亿参数的 AI 模型</b><br>
 NVIDIA 或 AMD 显卡（12 GB 及以上）· Windows 或 Linux · 免费开源</p>

@@ -1,4 +1,36 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">🪶 Dragonfly</h1>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly at the Pareto frontier of inference performance"></p>
+
+## What is Dragonfly?
+
+**Dragonfly is DeepSeek V4.1 Flash 1017 at the Pareto frontier.**
+
+Dragonflies don't fly by brute force. They fly with four independently controlled wings, making constant micro-adjustments with minimal energy. Dragonfly applies the same principle to inference: specialize aggressively, control execution precisely, eliminate waste, extract maximum performance.
+
+### The design
+
+- **Specialized, not generic.** Every optimization targets DeepSeek V4.1 Flash 1017's exact architecture and execution patterns.
+- **Precise, not powerful.** Four independent control surfaces (execution, memory, scheduling, hardware) finely tuned instead of one blunt instrument.
+- **At the edge.** Trading flexibility for performance to reach the Pareto frontier—the point where you can't improve one metric without sacrificing another.
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **Optimized for** | DeepSeek V4.1 Flash 1017 only | Multiple models |
+| **Philosophy** | Specialized precision | General-purpose flexibility |
+| **Use case** | Maximum throughput/latency on one model | Broad hardware & model support |
+| **Fused quantization** | ✅ Yes | ❌ No |
+| **Expert residency tuning** | ✅ Calibrated & measured | ❌ No |
+| **Drop-in replacement** | ❌ No | ✅ Yes |
+
+**Use Strata if** you need multi-model support or broad hardware compatibility.
+**Use Dragonfly if** you want maximum performance on DeepSeek V4.1 Flash 1017.
+
+---
+
+# Strata
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
 
