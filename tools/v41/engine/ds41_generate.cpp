@@ -82,7 +82,7 @@ struct Args {
     float temp = 0.0f;
     uint64_t seed = 1;
     std::vector<int> stop;
-    bool ppl = false, serve = false, quiet = false, vram_lru = true, arena_adapt = false, chunk_mmq = false;
+    bool ppl = false, serve = false, quiet = false, vram_lru = true, arena_adapt = false, chunk_mmq = false, chunk_batch = false;
     bool act_quant = true, chunk_prefetch = true, kv_fp4 = false;
     bool prefix_cache = true;
     int  enc_skip = -1;           // -1 = default (on for one-shot layer-major runs), 1 = --enc-skip, 0 = --no-enc-skip; only run the tokens before the replay window through layers 21-39
@@ -129,6 +129,8 @@ bool parse(int argc, char ** argv, Args & a) {
             return false;
         }
         else if (k == "--no-chunk-mmq") a.chunk_mmq = false;
+        else if (k == "--chunk-batch") a.chunk_batch = true;
+        else if (k == "--no-chunk-batch") a.chunk_batch = false;
         else if (k == "--no-chunk-prefetch") a.chunk_prefetch = false;
         else if (k == "--chunk-prefetch") a.chunk_prefetch_gib = std::atof(next().c_str());
         else if (k == "--skip-miss") a.skip_miss = (float) std::atof(next().c_str());
@@ -158,6 +160,10 @@ bool parse(int argc, char ** argv, Args & a) {
     }
     if ((a.backend != "cpu" && a.backend != "cuda") || (a.experts != "cpu" && a.experts != "gpu")) {
         std::fprintf(stderr, "ds41_generate: --backend must be cpu|cuda and --experts must be cpu|gpu\n");
+        return false;
+    }
+    if (a.chunk_batch && a.experts != "gpu") {
+        std::fprintf(stderr, "ds41_generate: --chunk-batch requires --experts gpu\n");
         return false;
     }
     return !a.model.empty() && (a.serve || !a.ids_csv.empty() || !a.ids_file.empty() || !a.build_mirror.empty());
@@ -412,6 +418,7 @@ int main(int argc, char ** argv) {
     mc.vram_lru = a.vram_lru;
     mc.arena_adapt = a.arena_adapt;
     mc.chunk_mmq = a.chunk_mmq;
+    mc.chunk_batch = a.chunk_batch;
     mc.chunk_prefetch = a.chunk_prefetch;
     mc.chunk_prefetch_gib = a.chunk_prefetch_gib;
     mc.skip_miss = a.skip_miss;
