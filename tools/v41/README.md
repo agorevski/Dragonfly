@@ -334,6 +334,14 @@ nonzero CPU fixture: routing inputs/ids/weights, state and logits, including
 repeated and changed shapes, column resizing, compression boundaries and
 LRU eviction. No real-model GPU speedup is claimed by this fixture.
 
+The CUDA counterpart is `CUDA_VISIBLE_DEVICES=1 ctest --test-dir BUILD
+-R '^ds41_span_cache_cuda$' -V`. On physical GPU 1 (SM75), Linux,
+GCC 13 and CUDA 13.4, all four combinations passed bitwise comparisons,
+including LRU eviction and column reallocation. The same test also passed
+with `DS41_GRAPH_REUSE=0 STRATA_SPAN_MEMO=0` and, separately, with
+`GGML_CUDA_DISABLE_GRAPHS=1`. Fixture times include order-dependent CUDA
+warmup and are not an end-to-end throughput measurement.
+
 ## Optional native expert batch tiles
 
 `ds41_generate --experts gpu --chunk-batch` opts prompt chunks into a
