@@ -96,7 +96,7 @@ def parse_done(line, observed, expected, prompt_tokens):
 
 
 def command(args):
-    return [str(args.engine), "-m", str(args.model), "--serve", "--backend", "cuda",
+    argv = [str(args.engine), "-m", str(args.model), "--serve", "--backend", "cuda",
             "--experts", "gpu", "--slots", args.slots,
             "--vram-margin", str(args.vram_margin), "--arena-gib", str(args.arena_gib),
             "--pcie", str(args.pcie), "--pf-b", str(args.pf_b),
@@ -105,6 +105,9 @@ def command(args):
             "--temp", "0", "--seed", str(args.seed), "--route-bias", "0",
             "--route-bias-file", "0", "--skip-miss", "0", "--skip-file", "0",
             "--no-enc-skip", "--no-prefix-cache", "--vram-lru"]
+    if args.chunk_batch:
+        argv.append("--chunk-batch")
+    return argv
 
 
 def run_protocol(args, ids, result):
@@ -115,9 +118,19 @@ def run_protocol(args, ids, result):
     env["STRATA_V41_CONFIG"] = str(args.config)
     if args.step_max is not None:
         env["STRATA_SERVE_STEP_MAX"] = str(args.step_max)
+    switches = {
+        "STRATA_DEVICE_ACTIVATIONS": args.device_activations,
+        "STRATA_TIER_GRAPH": args.tier_graph,
+        "STRATA_DMA_OVERLAP": args.dma_overlap,
+        "GGML_CUDA_DISABLE_GRAPHS": args.disable_cuda_graphs,
+    }
+    for name, enabled in switches.items():
+        if enabled:
+            env[name] = "1"
     result["environment"] = {"CUDA_VISIBLE_DEVICES": "0",
                              "STRATA_V41_CONFIG": str(args.config),
                              "STRATA_SERVE_STEP_MAX": env.get("STRATA_SERVE_STEP_MAX"),
+                             **{name: env.get(name) for name in switches},
                              "engine_overrides": "all other STRATA_*, DS41_*, GGML_* removed"}
     start = time.monotonic()
     process = subprocess.Popen(result["command"], stdin=subprocess.PIPE,
@@ -255,6 +268,12 @@ def main():
     parser.add_argument("--chunk", type=int, default=16)
     parser.add_argument("--step-max", type=int,
                         help="explicit short-turn pass cutoff; 0 forces layer-major prefill")
+    parser.add_argument("--chunk-batch", action="store_true", help="opt in to four-column expert kernels")
+    parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
+    parser.add_argument("--tier-graph", action="store_true", help="opt in to expert-tier graph capture")
+    parser.add_argument("--dma-overlap", action="store_true", help="opt in to expert demand-copy overlap")
+    parser.add_argument("--disable-cuda-graphs", action="store_true",
+                        help="force eager ggml execution in a graph-enabled build")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--ctx", type=int, default=4096)
     parser.add_argument("--seed", type=int, default=1)

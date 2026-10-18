@@ -33,6 +33,14 @@ Suggested finite matrix, keeping all other flags identical:
    `--prompt-batch 64 --chunk 32`.
 5. CPU/PCIe axis: 64 IDs, residency flags plus `--pcie 0` (same thread count).
 
+For the integrated roadmap engine, compare each opt-in separately against the
+same binary and input: `--device-activations`, `--chunk-batch` (with
+`--step-max 0`), `--tier-graph`, and `--dma-overlap`. A graph-enabled build can
+be compared with eager ggml execution using `--disable-cuda-graphs`; this does
+not disable the independent expert-tier graph switch. Record build-time CUDA
+graph settings with the engine revision. All harness switches default off,
+and inherited switch values are removed before explicit settings are applied.
+
 The engine normally uses its short-turn passes through 768 new tokens, so
 changing prompt batch alone at 64/128 tokens does not exercise layer-major
 geometry. `--step-max 0` explicitly sets `STRATA_SERVE_STEP_MAX=0` for the
@@ -60,6 +68,6 @@ disabled. OS page-cache warmth is uncontrolled across all runs. Do not compare
 these labels as cold-disk measurements. Route and file biases are zero,
 pruning/skipping and encoder skipping are disabled, and no DSpark draft is
 loaded. Other STRATA/DS41/GGML environment overrides are removed (except the
-explicit `--step-max` setting). Standard
+explicit settings above). Standard
 checkpoint Engram is retained. Keep raw failures and do not report a speedup
 from incomplete generation or change defaults based on these short runs.
