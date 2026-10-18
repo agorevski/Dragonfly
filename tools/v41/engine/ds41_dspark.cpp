@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <thread>
 
@@ -58,6 +59,8 @@ struct Ds41DSpark::Impl {
     std::map<std::pair<int, bool>, G> graphs;
     std::pair<int, bool> last_key { -1, false };   ///< the graph ga was last planned for
     double ms = 0;
+    bool ready = false, failed = false;
+    int last_pos = -1;
 
     ~Impl() {
         if (const char * cf = std::getenv("STRATA_DSPARK_COUNT"); cf && !counts.empty()) {
@@ -80,6 +83,7 @@ struct Ds41DSpark::Impl {
     }
     ggml_tensor * BW(int b, const std::string & n) const { return W("mtp." + std::to_string(b) + "." + n); }
     bool load(std::string & e);
+    bool validate(std::string & e) const;
     G & graph(int k, bool draft);
 };
 
@@ -89,6 +93,78 @@ int64_t Ds41DSpark::main_dim() const { return 3 * p_->D; }
 double Ds41DSpark::last_ms() const { return p_->ms; }
 size_t Ds41DSpark::weight_bytes() const { return p_->wbytes; }
 const std::string & Ds41DSpark::last_error() const { return p_->err; }
+
+bool Ds41DSpark::Impl::validate(std::string & e) const {
+    auto check = [&](const GgufModel & model, const std::string & name,
+                     const std::vector<int64_t> & shape, bool f32 = false) {
+        size_t shard = 0;
+        const auto * t = model.find(name, &shard);
+        if (!t) { e = "DSpark: missing tensor " + name; return false; }
+        std::vector<uint64_t> expected(shape.begin(), shape.end()), actual(t->shape);
+        while (expected.size() > 1 && expected.back() == 1) expected.pop_back();
+        while (actual.size() > 1 && actual.back() == 1) actual.pop_back();
+        if (actual != expected) { e = "DSpark: incompatible shape for " + name; return false; }
+        if (t->type >= GGML_TYPE_COUNT ||
+            (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16 &&
+             !ggml_is_quantized((ggml_type) t->type)) || (f32 && t->type != GGML_TYPE_F32)) {
+            e = "DSpark: unsupported type for " + name; return false;
+        }
+        if (t->shape[0] % ggml_blck_size((ggml_type) t->type)) {
+            e = "DSpark: incompatible quantization block for " + name; return false;
+        }
+        if (!model.in_bounds(*t, shard)) { e = "DSpark: incomplete tensor data for " + name; return false; }
+        return true;
+    };
+    if (!check(*main, "output.weight", { D, V }) ||
+        !check(*main, "token_embd.weight", { D, V })) return false;
+    if (main->find("token_embd.weight")->type != GGML_TYPE_F16) {
+        e = "DSpark: token_embd must be F16"; return false;
+    }
+    if (cfg.shared_head && (cfg.shared_head->ne[0] != D || cfg.shared_head->ne[1] != V ||
+                           cfg.shared_head->ne[2] != 1 || cfg.shared_head->ne[3] != 1)) {
+        e = "DSpark: shared_head shape differs from output.weight"; return false;
+    }
+    const auto * experts = side->find("mtp.0.ffn.experts.w1.weight");
+    if (!experts || experts->shape.size() != 3 || experts->shape[2] < (uint64_t) NU) {
+        e = "DSpark: missing or incompatible mtp.0.ffn.experts.w1.weight"; return false;
+    }
+    const int64_t ne = (int64_t) experts->shape[2];
+    const int64_t mix = (2 + HC) * HC;
+    for (int b = 0; b < 3; ++b) {
+        const std::string p = "mtp." + std::to_string(b) + ".";
+        for (const char * site : { "attn", "ffn" }) {
+            if (!check(*side, p + "hc_" + site + "_fn", { HC * D, mix }) ||
+                !check(*side, p + "hc_" + site + "_scale", { 3 }, true) ||
+                !check(*side, p + "hc_" + site + "_base", { mix }, true) ||
+                !check(*side, p + site + "_norm.weight", { D }, true)) return false;
+        }
+        for (const auto & entry : std::initializer_list<std::pair<const char *, std::vector<int64_t>>>{
+                 { "attn.wq_a.weight", { D, g.r_q } }, { "attn.q_norm.weight", { g.r_q } },
+                 { "attn.wq_b.weight", { g.r_q, DH * NH } }, { "attn.wkv.weight", { D, DH } },
+                 { "attn.kv_norm.weight", { DH } }, { "attn.attn_sink", { NH } },
+                 { "attn.wo_a.weight", { OGD, OG * OL } }, { "attn.wo_b.weight", { OG * OL, D } },
+                 { "ffn.gate.weight", { D, ne } }, { "ffn.gate.bias", { ne } },
+                 { "ffn.experts.w1.weight", { D, NFF, ne } },
+                 { "ffn.experts.w3.weight", { D, NFF, ne } },
+                 { "ffn.experts.w2.weight", { NFF, D, ne } },
+                 { "ffn.shared_experts.w1.weight", { D, NFF } },
+                 { "ffn.shared_experts.w3.weight", { D, NFF } },
+                 { "ffn.shared_experts.w2.weight", { NFF, D } } }) {
+            if (!check(*side, p + entry.first, entry.second, entry.second.size() == 1)) return false;
+        }
+    }
+    const auto * markov = side->find("mtp.2.markov_head.embed.weight");
+    if (!markov || markov->shape.size() != 2 || markov->shape[0] == 0) {
+        e = "DSpark: missing or incompatible Markov embedding"; return false;
+    }
+    const int64_t md = (int64_t) markov->shape[0];
+    return check(*side, "mtp.0.main_proj.weight", { 3 * D, D }) &&
+           check(*side, "mtp.0.main_norm.weight", { D }, true) &&
+           check(*side, "mtp.2.norm.weight", { D }, true) &&
+           check(*side, "mtp.2.markov_head.embed.weight", { md, V }) &&
+           check(*side, "mtp.2.markov_head.head.weight", { md, V }) &&
+           check(*side, "mtp.2.confidence_head.proj.weight", { D + md, 1 });
+}
 
 bool Ds41DSpark::Impl::load(std::string & e) {
     // every mtp.* tensor of the sidecar (bias_vl too: tiny, unused for text) + the trunk's output.weight
@@ -150,6 +226,10 @@ bool Ds41DSpark::Impl::load(std::string & e) {
         }
         std::fclose(f);
         if (keep.size() != 3) { e = "STRATA_DSPARK_KEEP: expected 3 lines of counts"; return false; }
+        for (const auto & k : keep)
+            if (k.back() >= side->find("mtp.0.ffn.experts.w1.weight")->shape[2]) {
+                e = "STRATA_DSPARK_KEEP: expert index outside sidecar"; return false;
+            }
     }
     ggml_init_params ip = { (src.size() + 8) * ggml_tensor_overhead(), nullptr, true };
     wctx = ggml_init(ip);
@@ -224,10 +304,15 @@ bool Ds41DSpark::Impl::load(std::string & e) {
 }
 
 bool Ds41DSpark::init(const Ds41DSparkConfig & cfg, std::string & err) {
+    p_.reset(new Impl);
+    err.clear();
     Impl & im = *p_;
     im.cfg = cfg;
     im.be = cfg.backend;
     if (!im.be) { err = "Ds41DSpark: a backend is required"; return false; }
+    if (cfg.block != 5 || cfg.max_append < 1 || cfg.max_append > WIN || cfg.n_used < 1) {
+        err = "DSpark: requires block=5, max_append=1..128 and positive n_used"; return false;
+    }
     try {
         im.side = std::make_unique<GgufModel>(GgufModel::open(cfg.sidecar));
         im.main = std::make_unique<GgufModel>(GgufModel::open(cfg.main_gguf));
@@ -240,6 +325,19 @@ bool Ds41DSpark::init(const Ds41DSparkConfig & cfg, std::string & err) {
     im.D = G.n_embd; im.HC = G.hc; im.DH = G.d_head; im.NH = G.n_head; im.OG = G.o_groups; im.OL = G.o_lora;
     im.OGD = G.n_head * G.d_head / G.o_groups; im.NFF = G.n_ff; im.V = G.vocab; im.BS = cfg.block; im.KM = cfg.max_append;
     im.NU = cfg.n_used;
+    if (G.n_layer < 40) { err = "DSpark: trunk must contain target layers 37, 38 and 39"; return false; }
+    if (im.D <= 0 || im.HC <= 0 || im.DH < 32 || im.DH % 32 || im.V <= 0 ||
+        cfg.noise_id < 0 || cfg.noise_id >= im.V) {
+        err = "DSpark: incompatible geometry or noise token outside vocabulary"; return false;
+    }
+    if (!im.validate(err)) return false;
+    for (size_t s = 0; s < im.side->size(); ++s)
+        for (const auto & t : im.side->shard(s).tensors())
+            if (t.name.rfind("mtp.", 0) == 0 &&
+                (t.shape.empty() || t.shape.size() > GGML_MAX_DIMS || t.type >= GGML_TYPE_COUNT ||
+                 !im.side->in_bounds(t, s))) {
+                err = "DSpark: unsupported or incomplete tensor " + t.name; return false;
+            }
     if (!im.load(err)) return false;
     im.NE = im.BW(0, "ffn.experts.w1.weight")->ne[2];
     if (im.BW(0, "main_proj.weight")->ne[0] != 3 * im.D) { err = "mtp.0.main_proj is not [3*n_embd, n_embd]"; return false; }
@@ -258,16 +356,25 @@ bool Ds41DSpark::init(const Ds41DSparkConfig & cfg, std::string & err) {
     im.sbuf = ggml_backend_alloc_ctx_tensors_from_buft(im.sctx, ggml_backend_get_default_buffer_type(im.be));
     if (!im.sbuf) { err = "cannot allocate the DSpark state"; return false; }
     ggml_backend_buffer_clear(im.sbuf, 0);
-    std::vector<float> pre((size_t) (im.HC * im.BS), 0.0f);   // model.py make_identity_pre_mix: one-hot on copy 0
-    for (int64_t t = 0; t < im.BS; ++t) pre[(size_t) (t * im.HC)] = 1.0f;
-    ggml_backend_tensor_set(im.i_pre, pre.data(), 0, pre.size() * 4);
     im.ga = ggml_gallocr_new(ggml_backend_get_default_buffer_type(im.be));
+    im.ready = true;
     reset();
     return true;
 }
 
 void Ds41DSpark::reset() {
     p_->filled.assign(WIN, -1);
+    p_->last_pos = -1;
+    p_->failed = false;
+    p_->err.clear();
+    p_->ms = 0;
+    if (p_->sbuf) ggml_backend_buffer_clear(p_->sbuf, 0);
+    // The identity pre-mix is an input, not cache state.
+    if (p_->sbuf && p_->i_pre) {
+        std::vector<float> pre((size_t) (p_->HC * p_->BS), 0.0f);
+        for (int64_t t = 0; t < p_->BS; ++t) pre[(size_t) (t * p_->HC)] = 1.0f;
+        ggml_backend_tensor_set(p_->i_pre, pre.data(), 0, pre.size() * sizeof(float));
+    }
 }
 
 static ggml_tensor * fake_quant_fp8(ggml_context * c, ggml_tensor * x) {
@@ -411,8 +518,25 @@ Ds41DSpark::Impl::G & Ds41DSpark::Impl::graph(int k, bool draft) {
 
 bool Ds41DSpark::step(const float * mh, const int * pos, int k, int bonus, int * ids, float * conf) {
     Impl & im = *p_;
+    im.err.clear();
+    im.ms = 0;
+    if (!im.ready) { im.err = "DSpark step: not initialized"; return false; }
+    if (im.failed) { im.err = "DSpark step: reset required after backend failure"; return false; }
     if (k < 1 || k > im.KM) { im.err = "DSpark step: k out of range"; return false; }
+    if (!mh || !pos || (bonus >= 0 && (!ids || !conf || bonus >= im.V))) {
+        im.err = "DSpark step: missing input/output or bonus outside vocabulary"; return false;
+    }
+    int previous = im.last_pos;
+    for (int i = 0; i < k; ++i) {
+        if (pos[i] < 0 || pos[i] <= previous || pos[i] - (int64_t) pos[0] >= WIN ||
+            (bonus >= 0 && pos[i] > std::numeric_limits<int>::max() - im.BS)) {
+            im.err = "DSpark step: positions must increase without ring-slot aliasing; reset before rewind";
+            return false;
+        }
+        previous = pos[i];
+    }
     const auto t0 = std::chrono::steady_clock::now();
+    im.failed = true;  // Graph execution may partially overwrite the ring before returning an error.
     std::vector<int32_t> mp(pos, pos + k), ms((size_t) k);
     for (int i = 0; i < k; ++i) { ms[(size_t) i] = pos[i] % (int) WIN; im.filled[(size_t) ms[(size_t) i]] = pos[i]; }
     ggml_backend_tensor_set(im.i_main, mh, 0, (size_t) k * (size_t) (3 * im.D) * 4);
@@ -474,5 +598,7 @@ bool Ds41DSpark::step(const float * mh, const int * pos, int k, int bonus, int *
         }
     }
     im.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    im.last_pos = pos[k - 1];
+    im.failed = false;
     return true;
 }

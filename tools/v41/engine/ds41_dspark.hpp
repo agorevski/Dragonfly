@@ -1,6 +1,7 @@
 // tools/v41/engine/ds41_dspark.hpp - DeepSeek-V4.1's DSpark draft stack (the checkpoint's mtp.0-2) on ggml.
 //
-// Convention (docs/ds4/V41_DSPARK_AUDIT.md, verified against SGLang / vLLM / DeepSeek's model.py):
+// Convention inherited from the upstream DSpark audit (SGLang / vLLM / DeepSeek's model.py).
+// Local CPU synthetic checks do not establish compatibility or acceptance for real 1017 weights:
 //   main_hidden(p) = the HC-mean (mean over the hc streams) of the trunk residual ENTERING layers 37 / 38 / 39 at
 //                    position p, concatenated 37|38|39 -> [3 * n_embd]
 //   main_x         = main_norm(main_proj(main_hidden))                          (block 0's weights, shared by all)
@@ -18,8 +19,41 @@
 #include "ggml-backend.h"
 
 #include <memory>
+#include <random>
 #include <string>
+#include <utility>
 #include <vector>
+
+/// Only the matching prefix is accepted; later matches follow a rejected context.
+inline int ds41_dspark_accepted_prefix(const int * drafts, const int * verified, int count) {
+    int accepted = 0;
+    while (accepted < count && drafts[accepted] == verified[accepted]) ++accepted;
+    return accepted;
+}
+
+/// A rejected pass overwrote the ratio-2 compressor ring; an odd restart needs its accepted partner again.
+inline bool ds41_dspark_needs_refeed(int next_pos, bool rejected) {
+    return rejected && (next_pos & 1);
+}
+
+/// A deterministic draft is a point mass: accept with p(d), otherwise sample p excluding d.
+/// `dist` is the normalized target distribution after temperature/top-k/top-p/min-p filtering.
+inline bool ds41_dspark_spec_accept(const std::vector<std::pair<int, double>> & dist, int d,
+                                   std::mt19937_64 & rng, int & out) {
+    double pd = 0;
+    for (const auto & c : dist) if (c.first == d) pd = c.second;
+    std::uniform_real_distribution<double> u(0.0, 1.0);
+    if (pd > 0 && u(rng) < pd) return true;
+    double r = u(rng) * (1.0 - pd);
+    int last = -1;
+    for (const auto & c : dist) {
+        if (c.first == d) continue;
+        last = c.first;
+        if ((r -= c.second) <= 0) { out = c.first; return false; }
+    }
+    out = last >= 0 ? last : d;
+    return false;
+}
 
 struct Ds41DSparkConfig {
     ggml_backend_t backend = nullptr;   ///< the backend to run on (the engine's); required
@@ -43,8 +77,9 @@ public:
     int64_t main_dim() const;           ///< 3 * n_embd
     /// Append k main_hidden rows (k * main_dim floats, positions pos[0..k)) to every block's window, then - when
     /// `bonus` >= 0 - draft the block after the LAST appended position: ids[0..block) = tokens for pos+2.., conf
-    /// likewise.  `bonus` < 0: append only (seeding the window from a prompt).  Positions must be increasing and each
-    /// appended position is "accepted" (it stays in the window until 128 later positions push it out).
+    /// likewise.  `bonus` < 0: append only (seeding the window from a prompt). Positions must be nonnegative and
+    /// strictly increasing across calls; a rewind requires reset(). Only accepted rows may be appended. Invalid
+    /// arguments leave the window unchanged; a failed backend execution requires reset() before retrying.
     bool step(const float * main_hidden, const int * pos, int k, int bonus, int * ids, float * conf);
     /// Forget the window (a new conversation / a rewind past it).
     void reset();
