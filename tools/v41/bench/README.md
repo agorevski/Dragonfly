@@ -63,7 +63,9 @@ engine defaults:
 | `--moe-device-input` | Keep multi-GPU expert input on device; requires `--device-activations`. |
 | `--moe-peer-output` | Copy remote expert output on the owner stream before its completion wait. |
 
-These are candidates, not measured performance recommendations. Compare paired
+All remain experimental. The [checkpoint results](RESULTS.md#confirmed-kernel-tuning-and-return-controls)
+record local paired-load/tile gains, a smaller repeated block-geometry gain,
+modest grouped decode gains, and candidates that did not help. Compare paired
 gate/up against a control already using `--fused-gu`, and report extra staging
 VRAM rather than treating it as free speed. Each flag is recorded in the
 artifact environment; inherited `MIMO_*` staging overrides are also removed.

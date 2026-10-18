@@ -341,6 +341,9 @@ including LRU eviction and column reallocation. The same test also passed
 with `DS41_GRAPH_REUSE=0 STRATA_SPAN_MEMO=0` and, separately, with
 `GGML_CUDA_DISABLE_GRAPHS=1`. Fixture times include order-dependent CUDA
 warmup and are not an end-to-end throughput measurement.
+The later [four-GPU checkpoint screen](bench/RESULTS.md#additional-four-gpu-optimization-screening)
+found no prefill gain from either cache or their combination. Leave them off
+unless a same-build measurement on the intended workload shows otherwise.
 
 ## Optional native expert batch tiles
 
@@ -373,6 +376,31 @@ Do not infer end-to-end improvement from the removed memory operations;
 compare the same prompt and geometry with only this environment variable
 changed before enabling it for a workload.
 
+Three further batch controls are independent and default off:
+
+- `STRATA_DS41_BATCH_PAIR_GU=1` shares q8 activation loads between gate/up
+  dots in the fused producer. It implies the fused path; set
+  `STRATA_DS41_BATCH_FUSED_GU=1` explicitly when recording comparisons.
+- `STRATA_DS41_BATCH_COLS=8` uses eight activation columns instead of four.
+  The local model benefited when this was paired with shared gate/up loads,
+  not when the wider tile was enabled alone.
+- `STRATA_DS41_BATCH_DOWN_WARPS=4` uses four warps per down-projection CTA
+  instead of eight. On SM75 this increased theoretical eight-column down
+  occupancy from 16 to 20 resident warps without changing arithmetic.
+
+All require the applicable `--chunk-batch` path. They retain the same
+quantization, scratch sizes, expert-cache budgets and KV settings; they do not
+keep additional weight copies in VRAM. Nonzero mixed-format, tail, clamp,
+permuted-destination and resident/streamed fixtures compare output floats
+and hidden q8 storage bitwise. The
+[same-build model measurements](bench/RESULTS.md#confirmed-kernel-tuning-and-return-controls)
+separate the larger paired-load/tile gains from the smaller block-geometry
+gain and record both execution orders. These are opt-ins for the measured
+workload, not a change to Strata/Qwen or a universal recommendation.
+The measured 512-token profile explicitly uses `STRATA_SERVE_STEP_MAX=0`,
+`--prompt-batch 128 --prefill-chunk 64 --chunk-batch`. Otherwise the default
+short-turn path through 768 new tokens can bypass layer-major batch prefill.
+
 On physical GPU 0 (Quadro RTX 8000, SM75), Linux, GCC 13.3 and CUDA 13.4,
 the off/on CTests both passed with seed 7319, full-width nonzero synthetic
 weights and the cases below. All output floats and hidden q8_1 bytes were
@@ -391,7 +419,9 @@ grouped/batch pairs of ten launches described below.
 These measurements do **not** establish a general speedup: sparse groups
 regressed, the 65-entry ranges overlap, and the largest case was flat.
 The fused path remains experimental and off by default. No real-model
-throughput or quality comparison was run for this fusion.
+quality comparison was run for this fusion. Separate
+[four-GPU model timings](bench/RESULTS.md#new-opt-in-fused-gateup-prefill-kernel)
+measure its throughput; the table here describes only the synthetic runs.
 
 Synthetic checks on physical GPU 1, a Quadro RTX 8000 (SM75), Linux and CUDA
 13.4, used full 5120/2304 matrices, seed 7319 and no model weights. All output
@@ -477,7 +507,9 @@ path relies on default-stream ordering or kernels dereferencing peer memory.
 explicit seeds including a zero-resident GPU, changed inputs, nonblocking
 producer/consumer streams and device-context restoration. Run the fixture
 with neither flag, each flag alone and both flags, after reserving its GPUs.
-These are performance candidates, not measured throughput claims.
+The [four-GPU checkpoint screen](bench/RESULTS.md#additional-four-gpu-optimization-screening)
+found no meaningful throughput gain from these transfer changes; they remain
+experimental, not recommended performance defaults.
 
 `STRATA_EXP_MODE_T10=2` or `4` additionally enables two or four Q2_K
 gate/up rows per warp in grouped experts. This reuses the existing Q2_K dot
@@ -489,7 +521,13 @@ unchanged batch arithmetic, with nonzero quantized experts, empty groups,
 permuted destinations, zero activations, clamp cases and mixed-format
 fallbacks. Unset `STRATA_EXP_MODE_T10` and `STRATA_EXP_MODE_T11` for that
 fixture; it fixes Q3_K down to mode 0 to isolate gate/up. GPU reservation
-is required. These modes have not yet been measured on a full checkpoint.
+is required. The
+[full-checkpoint measurements](bench/RESULTS.md#confirmed-kernel-tuning-and-return-controls)
+also test each environment selector in a separate process.
+`STRATA_EXP_MODE_T11=2` or `4` separately selects an existing Q3_K grouped
+down-projection layout. Mode 1 failed the local SM75 nonzero fixture and was
+excluded from model runs. These layout choices are not the batch kernel's
+independent `STRATA_DS41_BATCH_DOWN_WARPS` control.
 
 The opt-in prints skipped dense activation bytes and decode-tier input
 transfer counters. These count only activation transfers, not expert weights,
