@@ -64,6 +64,74 @@ If the automatic budget has no room, decode uses the RAM/file tiers
 without a VRAM expert cache. An explicit `--slots N` remains a manual
 capacity choice; it must fit the available VRAM.
 
+## Experimental multi-GPU expert capacity prototype
+
+`STRATA_DS41_MGPU=ON` builds a separate resident-layer expert runner. It is
+off by default, is not linked into `ds41_generate`, and does **not** enable
+multi-GPU generation or serving. No checkpoint was loaded for its validation.
+The CPU `ds41_generate` executable was byte-identical with this option on
+and off in the same build directory (SHA-256
+`5dcc003bb6dd72817ce6914a82fe0da607610ae54ea40ae0a6f38c9cb65e7ddd`).
+
+```sh
+cmake -S tools/v41 -B build-ds41-mgpu \
+  -DSTRATA_DS41_GGML_DIR=/path/to/llama.cpp \
+  -DSTRATA_DS41_MGPU=ON -DSTRATA_DS41_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75
+cmake --build build-ds41-mgpu \
+  --target test_ds41_mgpu test_ds41_mgpu_cuda --parallel 2
+ctest --test-dir build-ds41-mgpu -R '^ds41_mgpu_plan$' --output-on-failure
+# Only after reserving physical GPUs 2 and 3:
+CUDA_VISIBLE_DEVICES=2,3 timeout 120s \
+  build-ds41-mgpu/test_ds41_mgpu_cuda --devices 0,1
+```
+
+For CPU planning only, use `STRATA_DS41_CUDA=OFF` and build
+`test_ds41_mgpu`. The CUDA test is deliberately not registered with CTest:
+it requires an explicit device lease. Device IDs are CUDA-visible ordinals.
+
+The C++ interface is `engine/ds41_mgpu.hpp`: `ds41_mgpu_plan` validates and
+sizes ownership without CUDA calls or model reads. `Ds41MultiGpuMoe::init`
+loads every routed expert of each assigned layer onto its owner, under
+explicit per-device caps for weights and workspace, while retaining a free
+VRAM reserve. An empty owner map balances contiguous layer counts, not
+heterogeneous card capacity; supply an explicit map for unequal caps.
+Duplicate device IDs, invalid mappings, unsupported formats and insufficient
+capacity fail rather than falling back to RAM or CPU execution.
+
+`run` is blocking single-token expert execution with **host** input/output
+pointers. Each owner has a nonblocking stream and bounded pinned staging;
+operations restore the caller's current device. Host staging does not enable
+peer access or assume NVLink/default-stream ordering. Initialization failure
+cleans partially loaded shards on their allocating devices. Allocation
+failures return an error; the reused native kernels retain their existing
+fatal launch-error checks.
+
+Supported inputs are uniform standard Q2_K or Q3_K gate/up/down, dimensions
+256 through 32768 in multiples of 256, 2 through 256 layers, 1 through 1024
+experts, and top-k at most 8. Every selected device must own a layer.
+There are no mixed formats, cache misses, prompt batches, device-pointer
+inputs, concurrent calls or graph support. Dense/attention/KV placement and
+the generator/server connection remain unimplemented.
+
+Synthetic tests on physical GPUs 2 and 3 (Quadro RTX 8000, SM75; one NVLink
+pair) used four layers, four experts, width/FFN 256 and top-k 2. Combined
+explicit device allocations were 1,053,072 bytes for Q2_K and 1,372,560
+bytes for Q3_K, excluding CUDA context overhead. Maximum relative L2 error
+against the existing CPU expert runner was 0.0230929 and 0.0182977,
+respectively (CUDA q8_1 versus CPU q8_K activation rounding; threshold 0.05).
+Tests cover layer-owner switching, duplicate expert IDs, repeated outputs,
+caller-device restoration, invalid requests, capacity/free-reserve rejection,
+and partial initialization cleanup followed by reinitialization.
+Physical allocator OOM and fatal CUDA failures were not induced.
+CPU tests cover explicit/noncontiguous ownership and invalid mappings.
+
+This validates only that two-device synthetic expert prototype, not
+four-device or cross-NODE execution, real-model capacity, throughput,
+logits or model quality. Full integration still needs dense/attention/KV
+ownership, inter-layer activation transfers, mixed-checkpoint validation,
+end-to-end reference checks and a same-day single-device benchmark.
+
 ## Serve through the isolated adapter
 
 The adapter reuses Strata's HTTP server in a separate process with V4.1
