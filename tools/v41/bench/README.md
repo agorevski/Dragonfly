@@ -59,6 +59,7 @@ engine defaults:
 | `--prefill-row-cache` | Reuse column-local prefill row maps across layers. |
 | `--stage-mib 128` | Set each streamed-expert staging half; also accepts 32, 64, 256 or 512. Allocation may be capped by free VRAM. |
 | `--down-mode 2` | Existing Q3_K decode down-projection layout; modes 0, 1 and 4 are also exposed for experiments. Mode 1 failed the local SM75 nonzero fixture and is excluded from real-model measurements. |
+| `--gu-mode 2` | Opt-in Q2_K decode gate/up row/warp layout; modes 0 and 4 also available. Mixed gate/up formats retain the previous dispatch. |
 | `--moe-device-input` | Keep multi-GPU expert input on device; requires `--device-activations`. |
 | `--moe-peer-output` | Copy remote expert output on the owner stream before its completion wait. |
 

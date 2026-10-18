@@ -136,6 +136,8 @@ def run_protocol(args, ids, result):
             env[name] = "1"
     if args.down_mode is not None:
         env["STRATA_EXP_MODE_T11"] = str(args.down_mode)
+    if args.gu_mode is not None:
+        env["STRATA_EXP_MODE_T10"] = str(args.gu_mode)
     if args.batch_columns is not None:
         env["STRATA_DS41_BATCH_COLS"] = str(args.batch_columns)
     if args.batch_down_warps is not None:
@@ -147,6 +149,7 @@ def run_protocol(args, ids, result):
                              "STRATA_SERVE_STEP_MAX": env.get("STRATA_SERVE_STEP_MAX"),
                              **{name: env.get(name) for name in switches},
                              "STRATA_EXP_MODE_T11": env.get("STRATA_EXP_MODE_T11"),
+                             "STRATA_EXP_MODE_T10": env.get("STRATA_EXP_MODE_T10"),
                              "STRATA_DS41_BATCH_COLS": env.get("STRATA_DS41_BATCH_COLS"),
                              "STRATA_DS41_BATCH_DOWN_WARPS": env.get("STRATA_DS41_BATCH_DOWN_WARPS"),
                              "MIMO_CHUNK_STAGE_MIB": env.get("MIMO_CHUNK_STAGE_MIB"),
@@ -294,6 +297,8 @@ def main():
                         help="opt in to fused gate/up activation and quantization; requires --chunk-batch")
     parser.add_argument("--down-mode", type=int, choices=(0, 1, 2, 4),
                         help="explicit Q3_K down-projection row/warp layout")
+    parser.add_argument("--gu-mode", type=int, choices=(0, 2, 4),
+                        help="explicit Q2_K gate/up row/warp layout")
     parser.add_argument("--batch-columns", type=int, choices=(4, 8),
                         help="explicit expert batch tile width; requires --chunk-batch")
     parser.add_argument("--batch-down-warps", type=int, choices=(4, 8),
