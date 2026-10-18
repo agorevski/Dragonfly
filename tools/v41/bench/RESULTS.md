@@ -114,3 +114,68 @@ Validation:
 Larger arenas (96 GiB), long contexts, thread-count sweeps, prefetch, repeated
 geometry/CPU trials, application-quality tests and other backends were not
 tested. No core/backend files changed, so no backend rebuild was required.
+
+## Integrated roadmap checkpoint comparison
+
+Five further serial runs used the integrated `perf/ds41-roadmap` engine at
+`b190925723e16c216da275135252c929f9ad7ca7`. The executable SHA256 was
+`8a415bda075065eee33d30f1883283b5be125c30b754fc803e8289cb02b10944`
+in every run. This private Release build used system GCC 13.3, CUDA 13.4,
+SM75, and `STRATA_DS41_CUDA_GRAPHS=ON`, `STRATA_DS41_DSPARK=ON` and
+`STRATA_DS41_MGPU=ON`. No draft sidecar or multi-GPU generation was used.
+All runtime optimizations remain opt-in; enabling their build does not change
+the repository defaults.
+
+Hardware, checkpoint, tokenizer, input IDs and generation settings were the
+same as `auto128` above: 128 input IDs, 32 output IDs, auto slots, 64 GiB arena,
+batch 32 / chunk 16, short-turn cutoff 0, context 4096 and eight CPU threads.
+Each run used the same binary and one process-cold request, without prefix
+reuse. OS page-cache warmth was uncontrolled. These were ordered single
+samples, not randomized or repeated trials.
+
+| Run | Explicit harness switches | Prefill tok/s | Decode tok/s | TTFT s |
+| --- | --- | ---: | ---: | ---: |
+| eager | `--disable-cuda-graphs` | 3.110 | 0.853 | 47.067 |
+| capture | none | 3.108 | 0.863 | 47.100 |
+| batch | `--disable-cuda-graphs --chunk-batch` | 3.117 | 0.850 | 46.983 |
+| device | `--disable-cuda-graphs --device-activations` | 3.114 | 0.852 | 47.028 |
+| combined | `--chunk-batch --device-activations --tier-graph --dma-overlap` | 3.123 | 0.863 | 46.907 |
+
+Every request completed with exactly the same 32 output IDs as the previous
+`6d55d203` baseline. All five runs recorded 1,773 decode VRAM hits out of
+7,440 expert lookups, 4,843 file routes and 133.804 GiB of request storage reads.
+Minimum MemAvailable across the matrix was 178.045 GiB; peak process RSS
+ranged from 69.654 to 69.715 GiB. All children exited with status zero, and
+the final GPU/process checks found no remaining model process.
+
+These runs establish a bounded generation regression check, not general logit
+equivalence or application quality. They do **not** establish a meaningful
+end-to-end acceleration: the observed decode range was only 0.850-0.863 tok/s
+and prefill 3.108-3.123 tok/s. The large file-tier traffic makes residency and
+storage worth investigating next; the synthetic kernel improvements alone
+did not translate into a demonstrated model-throughput gain here. No defaults
+were changed.
+
+Combined validation at the same engine revision:
+
+- `cmake --build build-roadmap-system --parallel 2` and
+  `ctest --test-dir build-roadmap-system --output-on-failure`: passed,
+  10/10 CPU tests.
+- `cmake --build build-roadmap-cuda --parallel 2`: passed. The first link
+  selected Conda's CUDA runtime with CUDA 13.4 headers; correcting only the
+  private cache's CUDA library paths and linker flags resolved it.
+- `CUDA_VISIBLE_DEVICES=2 ctest --test-dir build-roadmap-cuda -E 'mgpu_cuda' --output-on-failure`:
+  passed, 19/19 tests, including full-width batch CLI dispatch and nonzero
+  device-activation logit comparisons.
+- `CUDA_VISIBLE_DEVICES=2,3 timeout 120 build-roadmap-cuda/test_ds41_mgpu_cuda --devices 0,1`:
+  passed, synthetic uniform Q2_K/Q3_K resident-layer prototype only.
+- `python -m unittest discover -s tools/v41/bench -p 'test_*.py' -v`:
+  passed, 4/4 benchmark harness tests.
+- `python -m unittest tools.v41.serve.test_serve_ds41 serve.test_frontend serve.test_detok -q`:
+  passed, 44 ran with 5 optional-tokenizer skips.
+
+Raw evidence is under the integration worktree's `build-roadmap-real/`, with
+`summary.json`, per-run console JSON and each named run's `result.json`,
+`stdout.log` and `stderr.log`. The session artifact
+`files/validate_integrated_baseline.py` records the exact serial invocation
+and fails on any output-ID mismatch. These local artifacts are not committed.

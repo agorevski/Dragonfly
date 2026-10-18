@@ -336,6 +336,22 @@ the measurements do not justify changing any default. CPU CTest passed 3/3
 4/4. Only build/test/documentation files changed, not the dense/tier runner
 or global ggml/Strata sources.
 
+## Integrated roadmap measurements
+
+The opt-in roadmap paths were tested together on the local ten-shard Q2_K
+checkpoint using one Quadro RTX 8000, a Xeon W-2295 and a 64 GiB host arena.
+Five 128-input / 32-output trials retained identical generated IDs across
+the eager control, CUDA capture, batch kernels, device activations and combined
+options, and against the previous engine baseline. Decode measured
+0.850-0.863 tok/s and prefill 3.108-3.123 tok/s: these single samples do not
+establish an end-to-end speedup. Each request still read 133.804 GiB from
+storage. No default changed.
+
+The combined CPU suite passed 10/10 and the CUDA suite 19/19. See
+[the benchmark report](bench/RESULTS.md#integrated-roadmap-checkpoint-comparison)
+for exact settings, build revision, commands, results and limitations. This
+does not validate real DSpark speculation or multi-GPU checkpoint generation.
+
 ## Serve through the isolated adapter
 
 The adapter reuses Strata's HTTP server in a separate process with V4.1
