@@ -306,6 +306,9 @@ struct Ds41MoeConfig {
     /// MMQ covers and that have no SwiGLU clamp.  Needs a build with the prompt MMQ path (`strata_mmq`, with
     /// STRATA_MMQ_KQUANTS for K-quants / MXFP4); otherwise, and for VRAM-resident experts, the MMVQ kernel runs.
     bool chunk_mmq = false;
+    /// Opt-in four-column native DP4A tiles for 5120/2304 Q2_K/Q3_K gate/up + Q3_K down.
+    /// Other expert formats retain the grouped CUDA path. No fork MMQ ABI is needed.
+    bool chunk_batch = false;
     bool persistent_cache = false; ///< layer-sharded runner: compact prompt buffers, resident expert MMQ
     /// Prompt chunks: while layer l's experts compute (and the caller runs layer l+1's dense half), DMA layer l+1's
     /// arena experts into the other device half, which is then sized to a whole layer.  Off with arena_adapt.

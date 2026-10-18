@@ -132,6 +132,56 @@ logits or model quality. Full integration still needs dense/attention/KV
 ownership, inter-layer activation transfers, mixed-checkpoint validation,
 end-to-end reference checks and a same-day single-device benchmark.
 
+## Optional native expert batch tiles
+
+`ds41_generate --experts gpu --chunk-batch` opts prompt chunks into a
+four-activation-column DP4A kernel for standard 5120-wide, 2304-hidden
+experts: Q2_K or Q3_K gate/up and Q3_K down. It covers both resident and
+streamed experts without the fork MMQ ABI. Other layouts keep the grouped
+kernel. The default is **off**; `--no-chunk-batch` explicitly disables it.
+Decode, routing and the normal Strata engine are unchanged.
+
+The batch kernel reuses the existing finite SwiGLU clamp and q8_1 activation
+quantizer, including FP32 scale selection, integer rounding and FP16 scale
+storage. It does not implement LoRA or tail-scale layouts.
+
+Synthetic checks on physical GPU 1, a Quadro RTX 8000 (SM75), Linux and CUDA
+13.4, used full 5120/2304 matrices, seed 7319 and no model weights. All output
+floats and hidden q8_1 bytes matched the grouped path exactly, including
+mixed Q2_K/Q3_K gate/up, zero activations, empty groups, nonzero entry offsets,
+partial tiles and permuted token/destination indices. Independent dequantized
+FP64 accumulation references include activation rounding and clamp 10.
+The tier's `run_chunk` also matched default-off and enabled weighted outputs
+bitwise for resident and streamed synthetic experts.
+
+The microbenchmark measures only gate/up, clamped activation quantization and
+down kernels, not weight transfers, routing, dense layers or generation.
+It alternates execution order for five pairs of ten launches, after three
+warmups per measurement, using CUDA events. One measured Q2_K/Q2_K/Q3_K run:
+
+| Entries (two nonempty expert groups) | Grouped median [min, max], ms | Batch median [min, max], ms |
+| --- | --- | --- |
+| 3 | 0.162 [0.161, 0.162] | 0.153 [0.153, 0.154] |
+| 7 | 0.336 [0.336, 0.336] | 0.261 [0.260, 0.261] |
+| 15 | 0.697 [0.697, 0.698] | 0.529 [0.528, 0.529] |
+| 65 | 2.487 [2.389, 2.962] | 1.873 [1.848, 2.237] |
+| 257 | 9.813 [9.773, 11.792] | 7.337 [7.318, 7.493] |
+
+These are synthetic kernel measurements, **not a whole-model speedup**.
+No real-model quality, logits or throughput check was run for this option;
+other GPU architectures and backends were not validated. Reproduce with a
+private SM75 CUDA build using an existing ggml checkout:
+
+```sh
+cmake --build build-ds41 --target test_ds41_batch --parallel 2
+CUDA_VISIBLE_DEVICES=1 MIMO_CHUNK_STAGE_MIB=32 \
+  ctest --test-dir build-ds41 -R '^ds41_batch$' --output-on-failure -V
+```
+
+The synthetic test stays below 3 GiB of device allocations even with the
+default chunk staging size; the command above reduces that staging to
+32 MiB per half. No checkpoint or download is needed.
+
 ## Serve through the isolated adapter
 
 The adapter reuses Strata's HTTP server in a separate process with V4.1

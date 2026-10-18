@@ -3928,5 +3928,6 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
 }
 
+#include "ds41_batch.cuh"
 #include "fork/fork_weighted_sum.cuh"   // Strata-DS4 fork code (docs/UPSTREAM_SYNC.md)
 }  // namespace strata::kernels

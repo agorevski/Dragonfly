@@ -4182,7 +4182,16 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
             cudaEventCreate(&e1);
             cudaEventRecord(e0, gp.s);
         }
-        strata::kernels::native_expert_grouped(GL, (const unsigned long long*) gp.c_ptr, (const int32_t*) gp.c_start,
+        const bool batched = im.cfg.chunk_batch && strata::kernels::native_expert_batch_supported(GL);
+        if (batched) {
+            if (!strata::kernels::native_expert_batch(GL, (const unsigned long long*) gp.c_ptr,
+                    (const int32_t*) gp.c_start, (const int32_t*) gp.c_ng, (const int32_t*) gp.c_dst,
+                    (const int32_t*) gp.c_tokv, ng, NE, n, gp.c_xq, gp.c_scratch,
+                    (float*) gp.c_parts, gp.s)) {
+                std::fprintf(stderr, "ds41_moe: --chunk-batch launch bounds unsupported\n");
+                std::exit(1);
+            }
+        } else strata::kernels::native_expert_grouped(GL, (const unsigned long long*) gp.c_ptr, (const int32_t*) gp.c_start,
                                               (const int32_t*) gp.c_ng, (const int32_t*) gp.c_dst,
                                               (const int32_t*) gp.c_tokv, ng, NE, gp.c_xq, gp.c_scratch,
                                               (float*) gp.c_parts, gp.s, ng);
