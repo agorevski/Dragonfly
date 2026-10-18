@@ -16,16 +16,18 @@ def string(value):
     return struct.pack("<Q", len(data)) + data
 
 
-def fixture(directory, gpu_experts=False, nonzero=False):
-    dim = 256 if gpu_experts else 128
+def fixture(directory, gpu_experts=False, nonzero=False, batch_experts=False):
+    dim = 5120 if batch_experts else 256 if gpu_experts else 128
+    ff = 2304 if batch_experts else dim
+    rank = 128 if batch_experts else dim
     prefix = "deepseek41."
     metadata = {"general.architecture": "deepseek41"}
     integers = {
         "embedding_length": dim, "block_count": 2, "attention.head_count": 1,
         "attention.key_length": 64, "rope.dimension_count": 16,
-        "attention.q_lora_rank": dim, "attention.output_lora_rank": 64,
+        "attention.q_lora_rank": rank, "attention.output_lora_rank": 64,
         "attention.output_group_count": 1, "attention.sliding_window": 4,
-        "expert_count": 2, "expert_used_count": 1, "expert_feed_forward_length": dim,
+        "expert_count": 2, "expert_used_count": 1, "expert_feed_forward_length": ff,
         "expert_shared_count": 1, "hyper_connection.count": 4,
         "hyper_connection.sinkhorn_iterations": 4, "attention.indexer.head_count": 32,
         "attention.indexer.key_length": 128, "attention.indexer.top_k": 1,
@@ -92,14 +94,14 @@ def fixture(directory, gpu_experts=False, nonzero=False):
             add(base + f"hc_{site}_scale.weight", [3])
             add(base + f"{site}_norm.weight", [dim])
         for name, shape in (
-            ("attn_sinks", [1]), ("attn_q_a", [dim, dim]), ("attn_q_b", [dim, 64]),
-            ("attn_q_a_norm", [dim]), ("attn_kv", [dim, 64]), ("attn_kv_a_norm", [64]),
+            ("attn_sinks", [1]), ("attn_q_a", [dim, rank]), ("attn_q_b", [rank, 64]),
+            ("attn_q_a_norm", [rank]), ("attn_kv", [dim, 64]), ("attn_kv_a_norm", [64]),
             ("attn_output_a", [64, 64]), ("attn_output_b", [64, dim]),
             ("ffn_gate_inp", [dim, 2]),
-            ("ffn_gate_shexp", [dim, dim]), ("ffn_up_shexp", [dim, dim]),
-            ("ffn_down_shexp", [dim, dim]),
-            ("ffn_gate_exps", [dim, dim, 2]), ("ffn_up_exps", [dim, dim, 2]),
-            ("ffn_down_exps", [dim, dim, 2]),
+            ("ffn_gate_shexp", [dim, ff]), ("ffn_up_shexp", [dim, ff]),
+            ("ffn_down_shexp", [ff, dim]),
+            ("ffn_gate_exps", [dim, ff, 2]), ("ffn_up_exps", [dim, ff, 2]),
+            ("ffn_down_exps", [ff, dim, 2]),
         ):
             type_id = (11 if "down" in name else 10) if gpu_experts and "_exps" in name else 0
             add(base + name + ".weight", shape, type_id)
@@ -108,7 +110,7 @@ def fixture(directory, gpu_experts=False, nonzero=False):
     for name, shape in (
         ("attn_compressor_kv", [dim, 64]), ("attn_compressor_norm", [64]),
         ("attn_compressor_gate", [dim, 64]), ("indexer.attn_k", [64, 128]),
-        ("indexer.k_norm", [128]), ("indexer.attn_q_b", [dim, 4096]),
+        ("indexer.k_norm", [128]), ("indexer.attn_q_b", [rank, 4096]),
         ("indexer.proj", [dim, 32]), ("engram_q", [dim, 4]),
         ("engram_k", [dim, 4]), ("engram_wkv", [64, 5 * dim]),
     ):
@@ -268,8 +270,38 @@ def main():
                     elif "device activations:" in result.stderr:
                         raise AssertionError("Unset/zero activation opt-in changed the default path")
             print("Device activations: unset/zero/on exact nonzero logits and tokens; all-GPU, mixed and no-cache passed")
+            for flag in ("--chunk-batch", "--no-chunk-batch"):
+                result = subprocess.run(
+                    expert_command + ["--slots", "1", "--prompt-batch", "2", "--prefill-chunk", "2", flag],
+                    env=expert_env, text=True, capture_output=True, timeout=60,
+                )
+                if result.returncode or len(result.stdout.split()) != 2:
+                    raise AssertionError("Native batch flag failed on fallback layout: " +
+                                         result.stdout + result.stderr)
+            print("Native batch CLI: enabled/disabled options accepted on unsupported-width fallback fixture")
+            batch_directory = directory / "batch-experts"
+            batch_directory.mkdir()
+            batch_model, batch_config, _ = fixture(batch_directory, gpu_experts=True, batch_experts=True)
+            batch_env = dict(expert_env, STRATA_V41_CONFIG=str(batch_config), MIMO_CHUNK_PROF="1")
+            batch_command = expert_command.copy()
+            batch_command[batch_command.index("-m") + 1] = str(batch_model)
+            outputs = []
+            for flag in ("--no-chunk-batch", "--chunk-batch"):
+                result = subprocess.run(
+                    batch_command + ["--slots", "1", "--prompt-batch", "2", "--prefill-chunk", "2", flag],
+                    env=batch_env, text=True, capture_output=True, timeout=120,
+                )
+                if result.returncode or len(result.stdout.split()) != 2:
+                    raise AssertionError("Full-width native batch CLI failed: " + result.stdout + result.stderr)
+                if ("chunk batch:" in result.stderr) != (flag == "--chunk-batch"):
+                    raise AssertionError("Full-width batch dispatch was not selected as requested: " + result.stderr)
+                outputs.append(result.stdout.split())
+            if outputs[0] != outputs[1]:
+                raise AssertionError("Full-width batch CLI changed generated token IDs")
+            print("Native batch CLI: full-width 5120/2304 Q2_K/Q3_K dispatch exercised; enabled/disabled IDs match")
         for extra, message in (
             (["--chunk-mmq"], "--chunk-mmq is unavailable"),
+            (["--chunk-batch"], "--chunk-batch requires --experts gpu"),
             (["--expert-gpus", "0,1"], "unknown argument --expert-gpus"),
             (["--experts", "invalid"], "--experts must be cpu|gpu"),
         ):

@@ -51,6 +51,8 @@ build uses `-DSTRATA_DS41_CUDA=OFF`. The build fetches a pinned llama.cpp
 source archive for ggml, not model weights. To use an existing compatible
 llama.cpp checkout instead, pass
 `-DSTRATA_DS41_GGML_DIR=/path/to/llama.cpp`.
+Set `CMAKE_BUILD_PARALLEL_LEVEL=2` when building to bound the separate stock
+CUDA backend build as well as using `--parallel 2` for the add-on targets.
 
 The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
 `OFF` by default. A root-project opt-in build additionally needs
@@ -153,6 +155,12 @@ partial tiles and permuted token/destination indices. Independent dequantized
 FP64 accumulation references include activation rounding and clamp 10.
 The tier's `run_chunk` also matched default-off and enabled weighted outputs
 bitwise for resident and streamed synthetic experts.
+The standard CUDA GGUF fixture additionally runs the linked `ds41_generate`
+with `--chunk-batch` and `--no-chunk-batch`: full 5120/2304 Q2_K/Q3_K experts
+exercise the enabled dispatch, and a 256-wide fixture checks the grouped
+fallback. `MIMO_CHUNK_PROF=1` reports `chunk batch:` only when a batch launch
+is selected. The full-width fixture has zero weights and checks CLI wiring
+and matching generated IDs, not nonzero-model logits or quality.
 
 The microbenchmark measures only gate/up, clamped activation quantization and
 down kernels, not weight transfers, routing, dense layers or generation.
@@ -176,11 +184,19 @@ private SM75 CUDA build using an existing ggml checkout:
 cmake --build build-ds41 --target test_ds41_batch --parallel 2
 CUDA_VISIBLE_DEVICES=1 MIMO_CHUNK_STAGE_MIB=32 \
   ctest --test-dir build-ds41 -R '^ds41_batch$' --output-on-failure -V
+CMAKE_BUILD_PARALLEL_LEVEL=2 cmake --build build-ds41 --target ds41_generate --parallel 2
+CUDA_VISIBLE_DEVICES=1 MIMO_CHUNK_STAGE_MIB=32 \
+  ctest --test-dir build-ds41 -R '^ds41_standard_cuda$' --output-on-failure -V
 ```
 
 The synthetic test stays below 3 GiB of device allocations even with the
 default chunk staging size; the command above reduces that staging to
 32 MiB per half. No checkpoint or download is needed.
+The full CLI and private stock CUDA backend linked successfully with two
+build jobs. The CPU and CUDA standard GGUF tests passed together in 7.28 s;
+a repeated CUDA launcher test passed in 7.09 s, with physical GPU 1's total
+used memory sampled every 0.2 s peaking at 665 MiB.
+
 ## Optional device-resident decode activations
 
 `STRATA_DEVICE_ACTIVATIONS=1` keeps the one-token dense FFN input on the
