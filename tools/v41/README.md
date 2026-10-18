@@ -235,6 +235,51 @@ OpenAI and Anthropic responses. It rejects unsupported forced tool choice,
 vision, multi-GPU serving, penalties and logit bias. Incremental tool
 argument deltas, batching and session persistence are not implemented.
 
+## DSpark readiness (optional, off by default)
+
+`STRATA_DS41_DSPARK=ON` builds the experimental draft stack and its CPU synthetic
+regression test. It does not enable speculative decoding by itself:
+
+```sh
+cmake -S tools/v41 -B build-ds41-cpu \
+  -DCMAKE_BUILD_TYPE=Release -DSTRATA_DS41_CUDA=OFF \
+  -DSTRATA_DS41_DSPARK=ON
+cmake --build build-ds41-cpu --target ds41_generate test_ds41_dspark --parallel 2
+ctest --test-dir build-ds41-cpu -R 'ds41_(standard|dspark_synthetic|dspark_rollback)$' --output-on-failure
+```
+
+The synthetic test uses small invented weights, not a real model. It checks
+accepted-prefix accounting at every draft depth, deterministic-draft sampling
+(including rejection and filtered-out drafts), rejection boundaries, batched
+and single-row draft-window appends through wraparound, reset/reinitialization,
+and failures for missing, truncated or mismatched sidecars and missing trunk
+metadata. The rollback test compares nonzero synthetic target logits with
+sequential decoding at every depth and rejection boundary, at both compressor
+parities and past the SWA ring wrap. It includes embedded quantized Engram,
+shared ratio-2 compressed KV and shared indexer state; routed expert output is
+zero and activation quantization is off. Removing the odd-position re-feed
+causes this test to fail. Both tests use CPU only, even in a CUDA build.
+These checks do **not** verify target-model rollback with real weights, GPU
+kernels, activation quantization, real-weight acceptance or speed.
+
+Real speculative decoding still needs a matching 1017 DSpark sidecar, the trunk's
+F16 token embeddings, and the GPU layer-major prompt path. No matching sidecar
+was available for this tranche; real-weight speculative decoding remains
+unvalidated. Structural tensor checks do not prove two artifacts came from the
+same checkpoint. Do not substitute a V4 sidecar or infer compatibility from the
+file name or tensor dimensions.
+
+An explicit one-shot request uses `STRATA_DSPARK=/path/to/sidecar.gguf`;
+serving uses `STRATA_SERVE_DSPARK=/path/to/sidecar.gguf` with `--serve`.
+`STRATA_DSPARK_DEPTH` is 1 through 5. Invalid sidecars and failed draft-window
+re-seeding are errors, not successful requests decoded silently without drafts.
+The draft API appends accepted positions only, in increasing order; callers must
+reset it before rewinding or after a backend execution failure.
+Metrics report accepted/proposed drafts and actual verified rows (including
+re-feeds). Accepted rows per pass are not emitted tokens per pass: a stop or
+output budget can end inside an accepted prefix. Empty-draft passes are excluded
+from the full-acceptance percentage. No acceleration claim is made by these tests.
+
 ## Keeping upstream updates
 
 The implementation lives under `tools/v41/`. The build integration is opt-in;

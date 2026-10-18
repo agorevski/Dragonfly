@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -14,7 +15,7 @@ def string(value):
     return struct.pack("<Q", len(data)) + data
 
 
-def fixture(directory, gpu_experts=False):
+def fixture(directory, gpu_experts=False, nonzero=False):
     dim = 256 if gpu_experts else 128
     prefix = "deepseek41."
     metadata = {"general.architecture": "deepseek41"}
@@ -62,12 +63,14 @@ def fixture(directory, gpu_experts=False):
         for dim in shape:
             count *= dim
         if type_id == 8:
-            payload = bytes(count // 32 * 34)
+            payload = (b"".join(struct.pack("<e", 0.01) + bytes([1 + row % 31]) * 32
+                                for row in range(count // 32)) if nonzero else bytes(count // 32 * 34))
         elif type_id in (10, 11):
             payload = bytes(count // 256 * (84 if type_id == 10 else 110))
         else:
             value = 1. if "norm" in name or "engram_q." in name or "engram_k." in name else 0.
-            payload = struct.pack("<f", value) * count
+            payload = (b"".join(struct.pack("<f", 0.1 * math.sin(i + 1)) for i in range(count))
+                       if nonzero and value == 0. else struct.pack("<f", value) * count)
         tensors.append((name, shape, type_id, payload))
 
     add("token_embd.weight", [dim, 4])
@@ -138,12 +141,21 @@ def main():
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--dspark-built", action="store_true")
+    parser.add_argument("--rollback-test", action="store_true")
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     directory = args.work.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     try:
-        model, config_path, config = fixture(directory)
+        model, config_path, config = fixture(directory, nonzero=args.rollback_test)
+        if args.rollback_test:
+            result = subprocess.run([str(args.engine.resolve()), "--rollback-test", str(model)],
+                                    env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),
+                                    text=True, capture_output=True, timeout=180)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            print(result.stdout, end="")
+            return
         env = dict(os.environ, STRATA_V41_CONFIG=str(config_path))
         for key in ("STRATA_DSPARK", "STRATA_SERVE_DSPARK"):
             env.pop(key, None)
@@ -193,7 +205,18 @@ def main():
             result = subprocess.run(command + extra, env=env, text=True, capture_output=True, timeout=60)
             if result.returncode != 2 or message not in result.stderr:
                 raise AssertionError("Unsupported option was not rejected: " + result.stderr)
-        if not args.dspark_built:
+        if args.dspark_built:
+            for settings, message in (
+                ({"STRATA_SERVE_DSPARK": "unused.gguf"}, "use STRATA_DSPARK"),
+                ({"STRATA_DSPARK": ""}, "sidecar path must not be empty"),
+                *(({"STRATA_DSPARK": "unused.gguf", "STRATA_DSPARK_DEPTH": depth}, "integer in 1..5")
+                  for depth in ("0", "6", "-1", "2junk", "")),
+            ):
+                result = subprocess.run(command, env=dict(env, **settings), text=True,
+                                        capture_output=True, timeout=60)
+                if result.returncode != 2 or message not in result.stderr:
+                    raise AssertionError("Invalid DSpark option was not rejected: " + result.stderr)
+        else:
             for key in ("STRATA_DSPARK", "STRATA_SERVE_DSPARK"):
                 result = subprocess.run(
                     command, env=dict(env, **{key: "not-built.gguf"}),

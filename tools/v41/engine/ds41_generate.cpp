@@ -223,26 +223,6 @@ void sample_dist(const float * logits, int n_vocab, float temp, int top_k, float
     for (int i = 0; i < n; ++i) out.push_back({ idx[(size_t) i], p[(size_t) i] / z });
 }
 
-// Speculative sampling with a DETERMINISTIC draft d (DSpark drafts by argmax: q = a point mass on d).  Leviathan /
-// Chen: accept with min(1, p(d) / q(d)) = p(d); on rejection sample from norm(max(0, p - q)) = p without d.  The
-// emitted token is then distributed exactly as p - the same as plain sampling.  true = d accepted; false = `out` is
-// the replacement token.
-bool spec_accept(const std::vector<std::pair<int, double>> & dist, int d, std::mt19937_64 & rng, int & out) {
-    double pd = 0;
-    for (const auto & c : dist) if (c.first == d) pd = c.second;
-    std::uniform_real_distribution<double> u(0.0, 1.0);
-    if (pd > 0 && u(rng) < pd) return true;
-    double r = u(rng) * (1.0 - pd);
-    int last = -1;
-    for (const auto & c : dist) {
-        if (c.first == d) continue;
-        last = c.first;
-        if ((r -= c.second) <= 0) { out = c.first; return false; }
-    }
-    out = last >= 0 ? last : d;   // rounding: the last candidate (d only if it was the sole candidate - then pd was 1)
-    return false;
-}
-
 double log_softmax_at(const float * lg, int nv, int tok) {
     const float mx = *std::max_element(lg, lg + nv);
     double z = 0;
@@ -264,6 +244,26 @@ int main(int argc, char ** argv) {
     if (std::getenv("STRATA_DSPARK") || std::getenv("STRATA_SERVE_DSPARK")) {
         std::fprintf(stderr, "ds41_generate: built without DSpark; configure STRATA_DS41_DSPARK=ON to use it\n");
         return 2;
+    }
+#else
+    if ((a.serve && std::getenv("STRATA_DSPARK")) || (!a.serve && std::getenv("STRATA_SERVE_DSPARK"))) {
+        std::fprintf(stderr, "ds41_generate: use STRATA_DSPARK for one-shot or STRATA_SERVE_DSPARK with --serve\n");
+        return 2;
+    }
+    const char * requested_draft = std::getenv(a.serve ? "STRATA_SERVE_DSPARK" : "STRATA_DSPARK");
+    if (requested_draft && !*requested_draft) {
+        std::fprintf(stderr, "ds41_generate: DSpark sidecar path must not be empty\n");
+        return 2;
+    }
+    if (requested_draft) {
+        if (const char * depth = std::getenv("STRATA_DSPARK_DEPTH")) {
+            char * end = nullptr;
+            const long value = std::strtol(depth, &end, 10);
+            if (end == depth || *end || value < 1 || value > 5) {
+                std::fprintf(stderr, "ds41_generate: DSpark depth must be an integer in 1..5\n");
+                return 2;
+            }
+        }
     }
 #endif
     if (!a.build_mirror.empty()) {   // the second-drive blob mirror (STRATA_BLOB_MIRROR): coldest experts first
@@ -1133,7 +1133,7 @@ int main(int argc, char ** argv) {
         // it carries over when the next request continues this one (dsp_next = the position its ring expects next);
         // any other reuse resets it (lower acceptance for a while, never a different output).
         int dsp_next = -1;
-        const int sp_depth_serve = std::getenv("STRATA_DSPARK_DEPTH") ? std::max(1, std::min(5, std::atoi(std::getenv("STRATA_DSPARK_DEPTH")))) : 4;
+        const int sp_depth_serve = std::getenv("STRATA_DSPARK_DEPTH") ? std::atoi(std::getenv("STRATA_DSPARK_DEPTH")) : 4;
         long sv_pass = 0, sv_acc = 0;
 #endif
         // STRATA_SERVE_STEP_MAX: new prompt tokens up to which a request runs on the decode side - passes of
@@ -1488,14 +1488,17 @@ int main(int argc, char ** argv) {
                     if (last) sp_t = sample_p(last_logits.data(), nv, temp, tk, top_p, min_p, rng);
                     if (!dsp->step(snap_seed.data() + (size_t) (i0 - s0) * 3 * n_embd, spos.data(), m, last ? sp_t : -1,
                                    last ? sp_ids : sp_tmp, sp_conf)) {
-                        std::fprintf(stderr, "serve: DSpark re-seed: %s (decoding without drafts)\n", dsp->last_error().c_str());
-                        dsp->reset();
-                        sp_t = -1;
+                        ferr = "DSpark re-seed: " + dsp->last_error();
+                        ok = false;
                         break;
                     }
                 }
                 ph_tail = now_ms() - tt0;
-                std::fprintf(stderr, "serve: repeated prompt - DSpark re-seeded from %d saved rows (%.2f s)\n", snap_seed_n, ph_tail / 1000.0);
+                if (ok) std::fprintf(stderr, "serve: repeated prompt - DSpark re-seeded from %d saved rows (%.2f s)\n", snap_seed_n, ph_tail / 1000.0);
+            }
+            if (ok && dsp_path && sp_t < 0) {
+                ferr = "DSpark: no accepted prompt rows available for drafting";
+                ok = false;
             }
 #endif
             dense.prof_report("turn");
@@ -1563,7 +1566,7 @@ int main(int argc, char ** argv) {
 #if defined(DS41_HAVE_DSPARK)
             // ---- DSpark speculative sampling (as the one-shot loop: P = last fed position, t = the token for P+1,
             // sp_ids = drafts for P+2..; each verify row's distribution is sample_p's, spec_accept keeps it exact)
-            long rq_pass = 0, rq_acc = 0;
+            long rq_pass = 0, rq_acc = 0, rq_drafts = 0, rq_rows = 0;
             if (sp_t >= 0) {
                 int P = total - 1, t = sp_t, prev = ids.back();
                 bool dirty = false;
@@ -1609,7 +1612,7 @@ int main(int argc, char ** argv) {
                         while (kk < k && 1.0f / (1.0f + std::exp(-sp_conf[kk])) >= conf_tau_s) ++kk;
                         k = kk;
                     }
-                    const bool refeed = dirty && ((P + 1) & 1);
+                    const bool refeed = ds41_dspark_needs_refeed(P + 1, dirty);
                     for (int i = 0; i < k; ++i) dr[i] = sp_ids[i];
                     bool is_lk = false;
                     if (lk_max > 0 && lk_cool > 0) --lk_cool;
@@ -1646,10 +1649,10 @@ int main(int argc, char ** argv) {
                     int acc = 0, tn = -1;
                     for (; acc < k; ++acc) {
                         sample_dist(vlog.data() + (size_t) (r0 + acc) * nv, nv, temp, tk, top_p, min_p, dist);
-                        if (!spec_accept(dist, dr[acc], rng, tn)) break;
+                        if (!ds41_dspark_spec_accept(dist, dr[acc], rng, tn)) break;
                     }
                     if (acc == k) tn = sample_p(vlog.data() + (size_t) (r0 + k) * nv, nv, temp, tk, top_p, min_p, rng);
-                    ++rq_pass; rq_acc += acc;
+                    ++rq_pass; rq_acc += acc; rq_drafts += k; rq_rows += (long) vt.size();
                     if (is_lk) {
                         ++lk_pass; lk_dr += k; lk_acc += acc;
                         if (2 * acc < k) { lk_cool = lk_back; lk_back = std::min(64, lk_back * 2); }
@@ -1698,6 +1701,15 @@ int main(int argc, char ** argv) {
                 std::fprintf(stderr, "serve: decode failed: %s\n", ferr.c_str());
                 hist.clear();
                 snap_len = -1;
+#if defined(DS41_HAVE_DSPARK)
+                if (sp_t >= 0) {
+                    dsp->reset();
+                    dsp_next = -1;
+                    std::printf("ERR decode failed: %s\n", ferr.c_str());
+                    std::fflush(stdout);
+                    continue;
+                }
+#endif
                 finish = "length";
             }
             std::fprintf(stderr, "serve: %d tokens in %.2f s = %.2f tok/s (%s); experts: %lld hit, %lld cpu, %lld pcie, %lld file\n",
@@ -1705,7 +1717,9 @@ int main(int argc, char ** argv) {
                          (long long) st.hits, (long long) st.cpu, (long long) st.pcie, (long long) st.file_tier);
 #if defined(DS41_HAVE_DSPARK)
             if (rq_pass > 0)
-                std::fprintf(stderr, "serve: DSpark %ld passes, %.2f tokens/pass (all requests %.2f)\n", rq_pass,
+                std::fprintf(stderr, "serve: DSpark %ld passes, %ld/%ld drafts accepted (%.1f%%), %ld verified rows, "
+                                     "%.2f accepted rows/pass (all requests %.2f)\n", rq_pass, rq_acc, rq_drafts,
+                             100.0 * rq_acc / std::max(1L, rq_drafts), rq_rows,
                              1.0 + (double) rq_acc / rq_pass, 1.0 + (double) sv_acc / std::max(1L, sv_pass));
 #endif
             tier.rebalance_tick(true);   // the gap until the next request: retire a large batch for the reader
@@ -1732,7 +1746,7 @@ int main(int argc, char ** argv) {
     if (spec) { std::fprintf(stderr, "ds41_generate: STRATA_DSPARK: built without ds41_dspark\n"); return 2; }
 #endif
     const int spec_depth = std::getenv("STRATA_DSPARK_DEPTH") ? std::atoi(std::getenv("STRATA_DSPARK_DEPTH")) : 4;
-    if (spec && (!defer_vram || S < 17 || dump_main || spec_depth < 0 || spec_depth > 5 || std::getenv("STRATA_FORCE_IDS"))) {
+    if (spec && (!defer_vram || S < 17 || dump_main || spec_depth < 1 || spec_depth > 5 || std::getenv("STRATA_FORCE_IDS"))) {
         std::fprintf(stderr, "ds41_generate: STRATA_DSPARK needs the GPU layer-major prompt path (S >= 17), depth 1..5, and no "
                              "STRATA_DUMP_MAIN / STRATA_FORCE_IDS\n");
         return 2;
@@ -1845,7 +1859,7 @@ int main(int argc, char ** argv) {
     // STRATA_ROUTE_TRACE=<file> (measurement only): the verify passes' routing + acceptance, for
     // tools/v41/sim/route_sim.py (session 13: in-pass draft pruning and the VRAM replacement policy, replayed offline)
     if (const char * rt = std::getenv("STRATA_ROUTE_TRACE")) tier.trace_open(rt);
-    long sp_pass = 0, sp_acc = 0, sp_refeed = 0, sp_full = 0;
+    long sp_pass = 0, sp_acc = 0, sp_refeed = 0, sp_full = 0, sp_drafts = 0, sp_rows = 0, sp_draft_pass = 0;
     const bool sp_noacc = std::getenv("STRATA_DSPARK_NOACC") != nullptr;
     double sp_vms = 0, sp_dms = 0;
     if (spec) {
@@ -1872,7 +1886,7 @@ int main(int argc, char ** argv) {
                 while (kk < k && sig(sp_conf[kk]) >= conf_tau) ++kk;
                 k = kk;
             }
-            const bool refeed = dirty && ((P + 1) & 1);
+            const bool refeed = ds41_dspark_needs_refeed(P + 1, dirty);
             vt.clear();
             if (refeed) vt.push_back(prev);
             vt.push_back(t);
@@ -1897,10 +1911,10 @@ int main(int argc, char ** argv) {
                 const float * row = vlog.data() + (size_t) (r0 + i) * nv;
                 g[i] = (int) (std::max_element(row, row + nv) - row);
             }
-            int acc = 0;
-            while (acc < k && sp_ids[acc] == g[acc]) ++acc;
+            int acc = ds41_dspark_accepted_prefix(sp_ids, g, k);
             if (sp_noacc) acc = 0;   // bisect tap: every draft rejected (the stream must stay plain greedy)
-            ++sp_pass; sp_acc += acc; sp_refeed += refeed; sp_full += acc == k;
+            ++sp_pass; sp_acc += acc; sp_refeed += refeed; sp_full += k > 0 && acc == k;
+            sp_drafts += k; sp_rows += (long) vt.size(); sp_draft_pass += k > 0;
             if (conf_log) {
                 // acceptance of EVERY draft against the trunk rows this pass computed (beyond k: unknown, -1)
                 std::fprintf(conf_log, "%d %d %.2f", k, acc, now_ms() - tv);
@@ -1963,9 +1977,12 @@ int main(int argc, char ** argv) {
                  (long long) st.prefetch_dummy, (long long) st.prefetched_useful);
 #if defined(DS41_HAVE_DSPARK)
     if (spec)
-        std::fprintf(stderr, "DSpark: %ld verify passes, %.3f accepted drafts/pass = %.3f tokens/pass, %.1f%% full, %ld re-fed; "
-                     "verify %.1f ms/pass, draft %.2f ms/pass (depth %d)\n", sp_pass, (double) sp_acc / std::max(1L, sp_pass),
-                     1.0 + (double) sp_acc / std::max(1L, sp_pass), 100.0 * sp_full / std::max(1L, sp_pass), sp_refeed,
+        std::fprintf(stderr, "DSpark: %ld verify passes, %ld/%ld drafts accepted (%.1f%%), %ld verified rows, "
+                     "%.3f accepted drafts/pass = %.3f accepted rows/pass, %.1f%% nonempty passes full, %ld re-fed; "
+                     "verify %.1f ms/pass, draft %.2f ms/pass (depth %d)\n", sp_pass,
+                     sp_acc, sp_drafts, 100.0 * sp_acc / std::max(1L, sp_drafts), sp_rows,
+                     (double) sp_acc / std::max(1L, sp_pass),
+                     1.0 + (double) sp_acc / std::max(1L, sp_pass), 100.0 * sp_full / std::max(1L, sp_draft_pass), sp_refeed,
                      sp_vms / std::max(1L, sp_pass), sp_dms / std::max(1L, sp_pass), spec_depth);
 #endif
     if (spec)
