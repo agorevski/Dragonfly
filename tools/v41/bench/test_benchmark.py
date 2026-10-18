@@ -75,7 +75,7 @@ class BenchmarkTests(unittest.TestCase):
                 if mode == "success":
                     argv += ["--device-activations", "--tier-graph", "--dma-overlap",
                              "--disable-cuda-graphs", "--chunk-batch", "--fused-gu",
-                             "--down-mode", "4"]
+                             "--down-mode", "4", "--moe-device-input", "--moe-peer-output"]
                 if mode == "occupied-multi":
                     argv += ["--gpus", "0,3"]
                 def capture(cmd):
@@ -88,6 +88,8 @@ class BenchmarkTests(unittest.TestCase):
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(B, "capture", capture), \
                         mock.patch.dict(B.os.environ, {"STRATA_DEVICE_ACTIVATIONS": "stale",
                                                        "STRATA_EXP_MODE_T11": "stale",
+                                                       "STRATA_MOE_DEVICE_INPUT": "stale",
+                                                       "STRATA_MOE_PEER_OUTPUT": "stale",
                                                        "STRATA_DS41_BATCH_FUSED_GU": "stale",
                                                        "STRATA_TIER_GRAPH": "stale",
                                                        "STRATA_DMA_OVERLAP": "stale",
@@ -117,7 +119,8 @@ class BenchmarkTests(unittest.TestCase):
                     if mode != "success":
                         self.assertIsNone(result["environment"]["STRATA_EXP_MODE_T11"])
                     for name in ("STRATA_DS41_BATCH_FUSED_GU", "STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
-                                 "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS"):
+                                 "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS",
+                                 "STRATA_MOE_DEVICE_INPUT", "STRATA_MOE_PEER_OUTPUT"):
                         self.assertEqual(result["environment"][name],
                                          "1" if mode == "success" else None)
         finally:
@@ -127,6 +130,15 @@ class BenchmarkTests(unittest.TestCase):
         argv = ["benchmark", "--engine", "engine", "--engine-revision", "test",
                 "--model", "model", "--config", "config", "--ids-file", "ids",
                 "--output", "unused", "--fused-gu"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                B.main()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_peer_input_requires_device_activations(self):
+        argv = ["benchmark", "--engine", "engine", "--engine-revision", "test",
+                "--model", "model", "--config", "config", "--ids-file", "ids",
+                "--output", "unused", "--moe-device-input"]
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as error:
                 B.main()

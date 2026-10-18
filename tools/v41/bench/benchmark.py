@@ -120,6 +120,8 @@ def run_protocol(args, ids, result):
     if args.step_max is not None:
         env["STRATA_SERVE_STEP_MAX"] = str(args.step_max)
     switches = {
+        "STRATA_MOE_DEVICE_INPUT": args.moe_device_input,
+        "STRATA_MOE_PEER_OUTPUT": args.moe_peer_output,
         "STRATA_DS41_BATCH_FUSED_GU": args.fused_gu,
         "STRATA_DEVICE_ACTIVATIONS": args.device_activations,
         "STRATA_TIER_GRAPH": args.tier_graph,
@@ -281,6 +283,10 @@ def main():
     parser.add_argument("--down-mode", type=int, choices=(0, 1, 2, 4),
                         help="explicit Q3_K down-projection row/warp layout")
     parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
+    parser.add_argument("--moe-device-input", action="store_true",
+                        help="keep sharded decode activations on devices; requires --device-activations")
+    parser.add_argument("--moe-peer-output", action="store_true",
+                        help="copy remote decode output before the tier completion wait")
     parser.add_argument("--tier-graph", action="store_true", help="opt in to expert-tier graph capture")
     parser.add_argument("--dma-overlap", action="store_true", help="opt in to expert demand-copy overlap")
     parser.add_argument("--disable-cuda-graphs", action="store_true",
@@ -295,6 +301,8 @@ def main():
     args = parser.parse_args()
     if args.fused_gu and not args.chunk_batch:
         parser.error("--fused-gu requires --chunk-batch")
+    if args.moe_device_input and not args.device_activations:
+        parser.error("--moe-device-input requires --device-activations")
     gpu_ids = args.gpus.split(",")
     if any(not item.isdigit() for item in gpu_ids) or len(set(map(int, gpu_ids))) != len(gpu_ids):
         parser.error("--gpus must list distinct nonnegative physical GPU ordinals")
