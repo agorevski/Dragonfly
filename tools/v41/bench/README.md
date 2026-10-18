@@ -44,6 +44,19 @@ be compared with eager ggml execution using `--disable-cuda-graphs`; this does
 not disable the independent expert-tier graph switch. Record build-time CUDA
 graph settings with the engine revision. All harness switches default off,
 and inherited switch values are removed before explicit settings are applied.
+`--fused-gu` explicitly enables the experimental fused gate/up activation
+and quantization kernel and requires `--chunk-batch`; it is otherwise off.
+
+The measured four-card prefill follow-up reached 90.570 tok/s warm with
+512 input tokens using `--prompt-batch 128 --chunk 64 --chunk-batch --step-max 0`,
+versus 65.148 with batch 32 / chunk 16. These are short same-machine samples,
+not a new default or a long-context recommendation. See the
+[full prefill results](RESULTS.md#further-four-gpu-prefill-measurements).
+
+For expert-cache sizing rather than throughput sweeps, use the separate
+[residency utility](../README.md#calibrating-a-smaller-persistent-expert-cache).
+Collect independent calibration/held-out profiles before reducing the cache;
+99% calibration coverage alone did not retain 99% held-out coverage locally.
 
 The engine normally uses its short-turn passes through 768 new tokens, so
 changing prompt batch alone at 64/128 tokens does not exercise layer-major

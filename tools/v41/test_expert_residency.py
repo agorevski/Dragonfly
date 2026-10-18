@@ -2,12 +2,16 @@
 import contextlib
 from decimal import Decimal
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path
 import unittest
 
-import expert_residency as utility
+spec = importlib.util.spec_from_file_location(
+    "expert_residency", Path(__file__).with_name("expert_residency.py"))
+utility = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(utility)
 
 
 class ResidencyTests(unittest.TestCase):
