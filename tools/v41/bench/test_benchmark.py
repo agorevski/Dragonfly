@@ -74,7 +74,7 @@ class BenchmarkTests(unittest.TestCase):
                         "--step-max", "0"]
                 if mode == "success":
                     argv += ["--device-activations", "--tier-graph", "--dma-overlap",
-                             "--disable-cuda-graphs", "--chunk-batch"]
+                             "--disable-cuda-graphs", "--chunk-batch", "--fused-gu"]
                 if mode == "occupied-multi":
                     argv += ["--gpus", "0,3"]
                 def capture(cmd):
@@ -86,6 +86,7 @@ class BenchmarkTests(unittest.TestCase):
                 memory = iter([100, 100, 39]) if mode == "memory" else None
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(B, "capture", capture), \
                         mock.patch.dict(B.os.environ, {"STRATA_DEVICE_ACTIVATIONS": "stale",
+                                                       "STRATA_DS41_BATCH_FUSED_GU": "stale",
                                                        "STRATA_TIER_GRAPH": "stale",
                                                        "STRATA_DMA_OVERLAP": "stale",
                                                        "GGML_CUDA_DISABLE_GRAPHS": "stale"}), \
@@ -110,12 +111,21 @@ class BenchmarkTests(unittest.TestCase):
                         with self.assertRaises(ProcessLookupError):
                             B.os.kill(result["pid"], 0)
                 if not mode.startswith("occupied"):
-                    for name in ("STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
+                    for name in ("STRATA_DS41_BATCH_FUSED_GU", "STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
                                  "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS"):
                         self.assertEqual(result["environment"][name],
                                          "1" if mode == "success" else None)
         finally:
             shutil.rmtree(root)
+
+    def test_fused_gate_up_requires_batch_dispatch(self):
+        argv = ["benchmark", "--engine", "engine", "--engine-revision", "test",
+                "--model", "model", "--config", "config", "--ids-file", "ids",
+                "--output", "unused", "--fused-gu"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                B.main()
+        self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == "__main__":

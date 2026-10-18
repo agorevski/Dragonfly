@@ -120,6 +120,7 @@ def run_protocol(args, ids, result):
     if args.step_max is not None:
         env["STRATA_SERVE_STEP_MAX"] = str(args.step_max)
     switches = {
+        "STRATA_DS41_BATCH_FUSED_GU": args.fused_gu,
         "STRATA_DEVICE_ACTIVATIONS": args.device_activations,
         "STRATA_TIER_GRAPH": args.tier_graph,
         "STRATA_DMA_OVERLAP": args.dma_overlap,
@@ -272,6 +273,8 @@ def main():
     parser.add_argument("--step-max", type=int,
                         help="explicit short-turn pass cutoff; 0 forces layer-major prefill")
     parser.add_argument("--chunk-batch", action="store_true", help="opt in to four-column expert kernels")
+    parser.add_argument("--fused-gu", action="store_true",
+                        help="opt in to fused gate/up activation and quantization; requires --chunk-batch")
     parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
     parser.add_argument("--tier-graph", action="store_true", help="opt in to expert-tier graph capture")
     parser.add_argument("--dma-overlap", action="store_true", help="opt in to expert demand-copy overlap")
@@ -285,6 +288,8 @@ def main():
     parser.add_argument("--timeout", type=float, default=600, help="whole process deadline, seconds")
     parser.add_argument("--min-available-gib", type=float, default=40)
     args = parser.parse_args()
+    if args.fused_gu and not args.chunk_batch:
+        parser.error("--fused-gu requires --chunk-batch")
     gpu_ids = args.gpus.split(",")
     if any(not item.isdigit() for item in gpu_ids) or len(set(map(int, gpu_ids))) != len(gpu_ids):
         parser.error("--gpus must list distinct nonnegative physical GPU ordinals")
