@@ -302,7 +302,7 @@ def main():
         for extra, message in (
             (["--chunk-mmq"], "--chunk-mmq is unavailable"),
             (["--chunk-batch"], "--chunk-batch requires --experts gpu"),
-            (["--expert-gpus", "0,1"], "unknown argument --expert-gpus"),
+            (["--expert-gpus", "0,1"], "--expert-gpus requires CUDA GPU experts"),
             (["--experts", "invalid"], "--experts must be cpu|gpu"),
         ):
             result = subprocess.run(command + extra, env=env, text=True, capture_output=True, timeout=60)

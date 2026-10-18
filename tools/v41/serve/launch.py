@@ -48,6 +48,10 @@ def make_config(args):
         raise ValueError("model config vocab_size does not match the exported tokenizer")
     command = ["-m", model, "--backend", args.backend, "--experts",
                "cpu" if args.backend == "cpu" else "gpu", "--ctx", str(args.context), "--stop", str(eos)]
+    if args.backend == "cuda":
+        command += ["--expert-gpus", args.expert_gpus]
+    elif args.expert_gpus != "auto":
+        raise ValueError("--expert-gpus requires --backend cuda")
     if args.engram:
         command += ["--engram", ":".join(existing(p, directory=True) for p in args.engram)]
     command += args.engine_arg
@@ -66,6 +70,8 @@ def main():
     ap.add_argument("--tokenizer", required=True, help="directory exported by export_tokenizer.py")
     ap.add_argument("--engram", action="append", default=[], help="optional external Engram directory (repeatable)")
     ap.add_argument("--backend", choices=("cuda", "cpu"), default="cuda")
+    ap.add_argument("--expert-gpus", default="auto",
+                    help="auto uses all visible CUDA GPUs; 0 keeps the single-GPU path")
     ap.add_argument("--context", type=int, default=4096)
     ap.add_argument("--model-name", default="deepseek-ai/DeepSeek-V4.1-Flash-1017")
     ap.add_argument("--engine-arg", action="append", default=[])
