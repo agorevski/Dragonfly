@@ -14,6 +14,7 @@ Strata を使うと、**[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8
 アプリやコーディングエージェントとも連携でき、データは PC の外に送信されません。
 
 このフォークでは、明示的に有効化して使う実験的な **DeepSeek V4.1 Flash1017** アドオンも、Linux の CPU または NVIDIA 向けの独立した手順で提供しています（[英語ガイド](tools/v41/README.md)）。既存の Strata インストーラーと Qwen のデフォルト設定は変更されません。
+独立した CUDA エンジンは、デフォルトで認識可能なすべての GPU を使用します（`--expert-gpus auto`）。マルチ GPU の対応範囲とプロファイリング結果はガイドを参照してください。
 
 ## どのくらい速い？
 

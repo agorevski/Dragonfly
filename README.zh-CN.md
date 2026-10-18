@@ -13,6 +13,7 @@ Strata 能在普通电脑上运行 **[Qwen3.8-Flash-Next](https://huggingface.co
 AI 模型，通常要用服务器才能跑。它能聊天、写代码、看图片，还能配合你的应用和编程智能体一起工作。所有数据都留在你的电脑上。
 
 本分支还提供需显式启用的实验性 **DeepSeek V4.1 Flash1017** 附加组件，采用独立的 Linux CPU 或 NVIDIA 运行路径，详见[英文指南](tools/v41/README.md)。现有 Strata 安装程序和 Qwen 默认设置保持不变。
+独立的 CUDA 引擎默认使用所有可见 GPU（`--expert-gpus auto`）；多 GPU 支持范围和性能分析结果请参阅指南。
 
 ## 速度有多快？
 

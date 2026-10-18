@@ -14,6 +14,7 @@ Das ist ein großes, kluges KI-Modell, das sonst meist einen Server braucht. Es 
 Bilder und arbeitet mit deinen Apps und Coding-Agents zusammen. Nichts verlässt deinen PC.
 
 Dieser Fork bietet außerdem eine experimentelle, ausdrücklich zu aktivierende Erweiterung für **DeepSeek V4.1 Flash1017** über einen separaten Linux-Pfad für CPU oder NVIDIA; siehe die [englische Anleitung](tools/v41/README.md). Der bestehende Strata-Installer und die Qwen-Standardeinstellungen bleiben unverändert.
+Die separate CUDA-Engine nutzt standardmäßig alle sichtbaren GPUs (`--expert-gpus auto`); Multi-GPU-Unterstützung und Profiling-Ergebnisse stehen in der Anleitung.
 
 ## Wie schnell ist es?
 

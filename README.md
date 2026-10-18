@@ -14,6 +14,8 @@ large, smart AI model that usually needs a server. It chats, writes code, reads 
 and coding agents. Nothing leaves your PC.
 
 This fork also has an opt-in, experimental [DeepSeek V4.1 Flash 1017 add-on](tools/v41/README.md).
+Its separate CUDA engine and server default to all visible GPUs (`--expert-gpus auto`);
+supported multi-GPU settings and measured profiling results are in the add-on guide.
 It leaves the normal Strata installer and Qwen defaults unchanged.
 
 ## How fast is it?

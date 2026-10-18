@@ -2,9 +2,11 @@
 
 `benchmark.py` drives the existing `ds41_generate --serve` token protocol directly.
 It does not modify the engine or the default server path and needs no downloads.
-Only physical GPU0 is visible. Reserve the GPU and the full-checkpoint host RAM
+Only physical GPU0 is visible by default. Use `--gpus 0,1,2,3` for the supported
+four-GPU path; the engine defaults to `--expert-gpus auto` within that mask.
+Reserve every selected GPU and the full-checkpoint host RAM
 before starting; do not run multiple instances concurrently.
-The first five bounded local runs and their limitations are in [RESULTS.md](RESULTS.md).
+The bounded single- and multi-GPU runs and their limitations are in [RESULTS.md](RESULTS.md).
 
 ```sh
 python -m unittest discover -s tools/v41/bench -p 'test_*.py' -v
@@ -32,6 +34,8 @@ Suggested finite matrix, keeping all other flags identical:
 4. Prefill geometry: the same 128 IDs and control flags plus
    `--prompt-batch 64 --chunk 32`.
 5. CPU/PCIe axis: 64 IDs, residency flags plus `--pcie 0` (same thread count).
+6. Multi-GPU: residency flags plus `--gpus 0,1,2,3 --expert-gpus auto`.
+   Keep `--pcie 1 --pf-b 0`; the pinned tail must fit the total arena budget.
 
 For the integrated roadmap engine, compare each opt-in separately against the
 same binary and input: `--device-activations`, `--chunk-batch` (with

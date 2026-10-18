@@ -14,6 +14,7 @@ un grand modèle d'IA, très capable, qui demande d'habitude un serveur. Il disc
 fonctionne avec vos applications et vos agents de code. Rien ne quitte votre PC.
 
 Ce fork propose aussi une extension expérimentale pour **DeepSeek V4.1 Flash1017**, à activer explicitement, via une procédure distincte sous Linux pour CPU ou NVIDIA ; consultez le [guide en anglais](tools/v41/README.md). L'installateur Strata existant et les paramètres par défaut de Qwen restent inchangés.
+Le moteur CUDA séparé utilise toutes les GPU visibles par défaut (`--expert-gpus auto`) ; le guide présente la prise en charge multi-GPU et les résultats de profilage.
 
 ## Quelle est sa vitesse ?
 
