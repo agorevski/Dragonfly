@@ -194,7 +194,7 @@ Use the selection in the production persistent layer-sharded runner:
 ```sh
 # Same model, visible device list/order, and geometry as the profile:
 build-ds41/ds41_generate ... --expert-gpus 0,1,2,3 \
-  --cache-seed selected.seed --arena-gib 100 --vram-margin 2 \
+  --cache-seed selected.seed --arena-gib 96 --vram-margin 2 \
   --route-bias 0 --route-bias-file 0
 ```
 
@@ -208,6 +208,17 @@ is actually resident, every unselected ID is pinned, and no file-tier expert
 remains. Allocation shortfalls fail rather than silently claiming the target.
 Caches and IDs stay fixed across prefill and requests. No automatic adjustment
 of context length or KV geometry is made.
+
+On the local four-RTX-8000 system, selecting all experts observed in eight
+calibration prompts retained 11,085 of 15,360 experts in VRAM. Actual seeded
+execution reached **99.170% aggregate decode hits** on four separate held-out
+prompts and released about **9.84 GiB on GPU0** by `nvidia-smi`, with identical
+generated IDs. This is not 99% on every prompt: one held-out prompt reached
+98.575%. A smaller selection targeting only 99% calibration coverage missed
+the held-out goal. See the [measured residency report](bench/RESULTS.md#profile-guided-expert-residency)
+for selection policy, RAM costs, phase coverage and limitations. The default
+cache remains unchanged; do not deploy a reduced seed without measuring your
+own workload.
 
 The aggregate ASCII format is `DS41_ROUTES_V1`, then `model HEADER_FNV1A64
 FIRST_FILE_BYTES`, `geometry LAYERS EXPERTS TOP_K HIDDEN FF`, one
