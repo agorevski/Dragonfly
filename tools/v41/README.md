@@ -181,6 +181,37 @@ CUDA_VISIBLE_DEVICES=1 MIMO_CHUNK_STAGE_MIB=32 \
 The synthetic test stays below 3 GiB of device allocations even with the
 default chunk staging size; the command above reduces that staging to
 32 MiB per half. No checkpoint or download is needed.
+## Optional device-resident decode activations
+
+`STRATA_DEVICE_ACTIVATIONS=1` keeps the one-token dense FFN input on the
+GPU for routed experts. It is off when unset or `0`, and ignored for CPU
+experts or the `STRATA_DEC_HOSTSUM` path. Prompt batching and multi-token
+verification keep their existing activation path.
+
+Router IDs and weights still reach the host. The dense backend synchronizes
+before the tier reads the activation on its own stream; the tier completes
+before the next dense call may reuse that buffer. CPU-served selected
+experts retain a synchronized activation readback. Layers served entirely
+on the GPU can omit that readback and the tier's activation upload.
+`STRATA_X_HOST=1` forces the tier's host staging for diagnostics.
+
+The opt-in prints skipped dense activation bytes and decode-tier input
+transfer counters. These count only activation transfers, not expert weights,
+router data or routed outputs. `STRATA_DUMP_DECODE_LOGITS=PATH` optionally
+writes one raw vocabulary-wide F32 row per ordinary one-shot decode output
+for numeric comparisons; it does not record speculative or server outputs.
+The synthetic `ds41_device_activations_cuda` and
+`ds41_device_activations_host_cuda` tests cover all-resident, mixed CPU-miss,
+no-cache CPU and PCIe-served expert inputs. No full-checkpoint throughput
+improvement is established by these tests.
+
+On a Quadro RTX 8000 (SM75), Linux/CUDA 13.4, the 256-wide Q3_K
+synthetic tier fixture produced bit-identical host/device-input outputs
+in all four cases (dequantized F32 reference relative error 0.0092–0.0109).
+Over 16 all-resident calls, host input uploaded 16,384 activation bytes;
+device input transferred zero activation bytes in either direction.
+Mixed and no-cache CPU cases retained 16,384 bytes in each direction.
+These are input-transfer counts, not a model-throughput measurement.
 
 ## Serve through the isolated adapter
 

@@ -1513,6 +1513,7 @@ const float * Ds41Dense::batch_wts() const { return p_->host_wts.data(); }
 const float * Ds41Dense::batch_fn() const { return p_->host_fn.data(); }
 
 bool Ds41Dense::attn_router(int il, int * ids, float * wts, const float ** fn_host, ggml_tensor ** fn_dev) {
+    if (!fn_host && !fn_dev) return false;
     Impl & im = *p_;
     const int64_t n = im.n;
     // Engram layer: wait the pass's reads (started in upload_inputs) before the graph that reads i_eng runs.  For the
@@ -1537,14 +1538,14 @@ bool Ds41Dense::attn_router(int il, int * ids, float * wts, const float ** fn_ho
     const bool ok = im.compute(gf, cached);
     if (gc) ggml_free(gc);
     if (!ok) return false;
-    // one sync for the three readbacks (was one per tensor_get: 3 x 40 stream syncs per decode token)
-    ggml_backend_tensor_get_async(im.backend, im.o_fn, im.host_fn.data(), 0, (size_t) (im.D * n) * 4);
+    // One sync for the router readbacks and the optional activation; also makes fn_dev ready on other streams.
+    if (fn_host) ggml_backend_tensor_get_async(im.backend, im.o_fn, im.host_fn.data(), 0, (size_t) (im.D * n) * 4);
     ggml_backend_tensor_get_async(im.backend, im.o_ids, im.host_ids.data(), 0, (size_t) (im.NU * n) * 4);
     ggml_backend_tensor_get_async(im.backend, im.o_wts, im.host_wts.data(), 0, (size_t) (im.NU * n) * 4);
     ggml_backend_synchronize(im.backend);
     std::memcpy(ids, im.host_ids.data(), (size_t) (im.NU * n) * 4);
     std::memcpy(wts, im.host_wts.data(), (size_t) (im.NU * n) * 4);
-    *fn_host = im.host_fn.data();
+    if (fn_host) *fn_host = im.host_fn.data();
     if (fn_dev) *fn_dev = im.o_fn;
     return true;
 }

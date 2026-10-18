@@ -2254,14 +2254,17 @@ bool gpu_run(Ds41MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w
                                       std::getenv("DS4_CHECK_GPU");
     if (x_dev && nk == 0 && !x_host_always) {
         strata::kernels::native_quantize_q8_1((const float*) x_dev, gp.d_xq, (int) H, 1, gp.s);
+        ++st.device_activation_calls;
     } else {
         if (x_dev) {
             ck(cudaMemcpyAsync(gp.h_x, x_dev, (size_t) H * 4, cudaMemcpyDeviceToHost, gp.s), "x d2h");
+            st.activation_d2h_bytes += H * 4;
             ck(cudaStreamSynchronize(gp.s), "x sync");   // the pool needs it on the host, now
         } else {
             std::memcpy(gp.h_x, x_host, (size_t) H * 4);
         }
         ck(cudaMemcpyAsync(gp.d_x, gp.h_x, (size_t) H * 4, cudaMemcpyHostToDevice, gp.s), "x h2d");
+        st.activation_h2d_bytes += H * 4;
         strata::kernels::native_quantize_q8_1((const float*) gp.d_x, gp.d_xq, (int) H, 1, gp.s);
     }
     ck(cudaEventRecord(gp.ev[0], gp.s), "record activation");
@@ -4589,13 +4592,14 @@ bool Ds41MoeTier::run(int64_t layer, const int32_t* ids6, const float* w6, const
 #endif
 }
 
-bool Ds41MoeTier::run_to_dev(int64_t layer, const int32_t* ids6, const float* w6, const float* x, void* out_dev) {
+bool Ds41MoeTier::run_to_dev(int64_t layer, const int32_t* ids6, const float* w6, const float* x, void* out_dev,
+                           const void* x_dev) {
     if (!im_->inited || !im_->pool) return false;
-    if (!ids6 || !w6 || !x || !out_dev) return false;
+    if (!ids6 || !w6 || (!x && !x_dev) || !out_dev) return false;
     rebal_count(*im_, layer, ids6, im_->g.top_k);
     if (!im_->g.routed(layer) || im_->cfg.cpu_only) return false;
 #if defined(DS4_MOE_CUDA)
-    return gpu_run(*im_, layer, ids6, w6, x, nullptr, nullptr, out_dev);
+    return gpu_run(*im_, layer, ids6, w6, x, x_dev, nullptr, out_dev);
 #else
     return false;
 #endif
@@ -5359,6 +5363,9 @@ void Ds41MoeStats::add(const Ds41MoeStats& o) {
     vram_swaps += o.vram_swaps;
     vram_demotes += o.vram_demotes;
     skipped += o.skipped;
+    activation_d2h_bytes += o.activation_d2h_bytes;
+    activation_h2d_bytes += o.activation_h2d_bytes;
+    device_activation_calls += o.device_activation_calls;
     gap_ms += o.gap_ms;
     hit_ms += o.hit_ms;
     pcie_ms += o.pcie_ms;
