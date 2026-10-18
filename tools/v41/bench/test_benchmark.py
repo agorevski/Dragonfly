@@ -74,7 +74,8 @@ class BenchmarkTests(unittest.TestCase):
                         "--step-max", "0"]
                 if mode == "success":
                     argv += ["--device-activations", "--tier-graph", "--dma-overlap",
-                             "--disable-cuda-graphs", "--chunk-batch", "--fused-gu"]
+                             "--disable-cuda-graphs", "--chunk-batch", "--fused-gu",
+                             "--down-mode", "4"]
                 if mode == "occupied-multi":
                     argv += ["--gpus", "0,3"]
                 def capture(cmd):
@@ -86,6 +87,7 @@ class BenchmarkTests(unittest.TestCase):
                 memory = iter([100, 100, 39]) if mode == "memory" else None
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(B, "capture", capture), \
                         mock.patch.dict(B.os.environ, {"STRATA_DEVICE_ACTIVATIONS": "stale",
+                                                       "STRATA_EXP_MODE_T11": "stale",
                                                        "STRATA_DS41_BATCH_FUSED_GU": "stale",
                                                        "STRATA_TIER_GRAPH": "stale",
                                                        "STRATA_DMA_OVERLAP": "stale",
@@ -102,6 +104,7 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertEqual(result["environment"]["STRATA_SERVE_STEP_MAX"], "0")
                     self.assertEqual(result["environment"]["CUDA_VISIBLE_DEVICES"], "0")
                     self.assertIn("--chunk-batch", result["command"])
+                    self.assertEqual(result["environment"]["STRATA_EXP_MODE_T11"], "4")
                 else:
                     self.assertIn("error", result)
                     if mode.startswith("occupied"):
@@ -111,6 +114,8 @@ class BenchmarkTests(unittest.TestCase):
                         with self.assertRaises(ProcessLookupError):
                             B.os.kill(result["pid"], 0)
                 if not mode.startswith("occupied"):
+                    if mode != "success":
+                        self.assertIsNone(result["environment"]["STRATA_EXP_MODE_T11"])
                     for name in ("STRATA_DS41_BATCH_FUSED_GU", "STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
                                  "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS"):
                         self.assertEqual(result["environment"][name],
