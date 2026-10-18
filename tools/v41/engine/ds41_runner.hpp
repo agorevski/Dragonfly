@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ds41_moe.hpp"
+#include "ds41_route_profile.hpp"
 #include <functional>
 
 namespace strata::v41 {
@@ -14,7 +15,11 @@ class Ds41MoeRunner : public Ds41MoeTier {
 public:
     ~Ds41MoeRunner();
     bool init(const Ds41MoeGeom &, Ds41BlobSource *, const Ds41MoeConfig &,
-              const std::vector<int> & devices, double reserve_gib, std::string & error);
+              const std::vector<int> & devices, double reserve_gib, std::string & error,
+              const std::vector<std::pair<int32_t,int32_t>> * selected = nullptr);
+    Ds41RouteProfile route_profile;
+    std::string route_profile_path;
+    bool write_route_profile() const;
     bool sharded() const { return !shards_.empty(); }
     bool seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>> &, std::string &);
     bool build_arena_ranked(const std::vector<std::pair<int32_t, int32_t>> &, std::string &);
@@ -50,6 +55,7 @@ private:
     std::vector<Shard> shards_;
     std::vector<size_t> owners_;
     int64_t hidden_ = 0;
+    bool initialized_ = false;
     mutable Ds41MoeStats aggregate_;
 };
 

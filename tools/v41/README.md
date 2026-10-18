@@ -132,6 +132,104 @@ Other GPU architectures, heterogeneous
 capacity balancing and long-context/concurrent serving are not established
 by the local four-Quadro-RTX-8000 measurements.
 
+## Calibrating a smaller persistent expert cache
+
+This opt-in tool counts **routed expert assignments**, not token hit/miss events.
+It does not change router scores, routing IDs, or expert arithmetic. For an unbiased
+calibration, explicitly disable the existing routing biases and pruning/skipping.
+Use representative prompts and enough generated tokens; prefill-only data is not
+a decode calibration. Keep a separate, independently collected held-out workload.
+
+Add these arguments to an otherwise identical engine command:
+
+```sh
+--route-profile train.routes --route-bias 0 --route-bias-file 0 \
+  --skip-miss 0 --skip-file 0 --no-enc-skip --no-prefix-cache
+```
+
+With `--serve`, counters accumulate across requests, are flushed **before every
+`DONE`**, and are also exported on `QUIT`/EOF. One-shot runs export on exit.
+No prompt text, token IDs, routing weights, or activations are recorded. Abrupt
+termination can lose the current request or interrupt an export; read the file
+after `DONE` or clean shutdown. Counts include routes actually executed, including
+speculative verification/rejected rows and retried work, not merely accepted tokens.
+Prefix reuse and encoder skipping naturally omit work that was not executed.
+The profiler also records the currently resident IDs at export time.
+
+```sh
+python tools/v41/expert_residency.py train.routes other-train.routes \
+  --phase decode --target .99 --held-out held.routes \
+  --output residency.json --seed-output selected.seed
+```
+
+`--phase all` is the default; `prefill` and `decode` stay separate in the input.
+Selection walks descending calibration frequency with deterministic `(layer,
+expert)` ties until the **global** requested assignment coverage is reached.
+The JSON lists exact IDs and per-layer coverage; 99% globally does not mean 99%
+in every layer or on future prompts. This minimizes the number of experts without
+capacity constraints, not the bytes of mixed-format experts. Optional
+`--capacity-bytes 0:BYTES,1:BYTES,...` specifies an expert-only budget for every
+profiled device; experts that cannot fit are skipped and an unattainable target
+fails visibly. Dense weights, KV, scratch, and allocator overhead need separate
+reserves. The runtime independently checks its real free VRAM.
+
+The held-out input never affects selection and must not name a calibration input
+(resolved path aliases are rejected). Its coverage is reported separately;
+**exit code 3** means it missed the requested target (the report/selection remain
+available for inspection). Invalid, zero-observation, incompatible, and overflowing
+inputs return code 2 with an error on stderr. Compatible calibration profiles can
+be merged; residency comparisons use the last profile's export snapshot.
+
+Per-card estimates use each physical native expert blob rounded up to **256
+bytes**, not a uniform average or dequantized tensor size. Reports distinguish
+current resident bytes, selected bytes, and the all-resident upper bound; pinned
+tail estimates use unpadded host blob bytes. **Dense/KV is on CUDA-visible device
+0 in this runner. Only device 0's `current_minus_selected_physical_bytes`
+directly releases memory for its KV budget.** Savings on other cards are not
+additional local KV space. A negative difference means the recommendation needs
+more expert VRAM than the exported baseline, not a saving.
+
+Use the selection in the production persistent layer-sharded runner:
+
+```sh
+# Same model, visible device list/order, and geometry as the profile:
+build-ds41/ds41_generate ... --expert-gpus 0,1,2,3 \
+  --cache-seed selected.seed --arena-gib 100 --vram-margin 2 \
+  --route-bias 0 --route-bias-file 0
+```
+
+`--cache-seed` is restricted to persistent multi-GPU mode and is mutually
+exclusive with `--rank`. It reuses the existing ranked seeder: selected IDs come
+first, every remaining owned expert follows into the pinned tail. Each card gets
+exactly its selected slot quota (including zero); `--slots` remains an optional
+per-card upper bound. Initialization rejects insufficient VRAM or aggregate
+`--arena-gib`/arena-cap coverage. After allocation it verifies every selected ID
+is actually resident, every unselected ID is pinned, and no file-tier expert
+remains. Allocation shortfalls fail rather than silently claiming the target.
+Caches and IDs stay fixed across prefill and requests. No automatic adjustment
+of context length or KV geometry is made.
+
+The aggregate ASCII format is `DS41_ROUTES_V1`, then `model HEADER_FNV1A64
+FIRST_FILE_BYTES`, `geometry LAYERS EXPERTS TOP_K HIDDEN FF`, one
+`expert L E DEVICE BLOB_BYTES ALIGNED_BYTES GATE_TYPE UP_TYPE DOWN_TYPE` per
+routed expert, and `count L E PREFILL DECODE RESIDENT_0_OR_1` for every geometry
+cell. `DS41_SEED_V1` repeats the model/geometry/expert metadata verbatim and adds
+`select L E` lines. Geometry, quantization layouts, and device ownership must
+match. Model identity is a first-64-KiB FNV-1a fingerprint plus the first file's
+size: an accidental-mismatch check, **not** a cryptographic verification of every
+model shard or external config. Keep those artifacts matched independently.
+
+CPU-only focused checks:
+
+```sh
+python tools/v41/test_expert_residency.py
+ctest --test-dir build-ds41 -R 'ds41_(runner_selection|expert_residency|standard)$' --output-on-failure
+```
+
+The exact-selection CUDA fixture is part of the explicitly leased
+`test_ds41_runner --cuda` run. CPU checks do not establish a real-workload 99%
+hit rate, long-context fit, or unchanged GPU performance.
+
 ## Experimental multi-GPU expert capacity prototype
 
 This earlier diagnostic remains separate from the supported runner above.

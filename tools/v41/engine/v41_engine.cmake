@@ -107,6 +107,8 @@ if(STRATA_DS41_BUILD_TESTS)
     add_test(NAME ds41_pool COMMAND test_ds41_pool)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME ds41_expert_residency COMMAND "${Python3_EXECUTABLE}"
+            "${_v41_dir}/../test_expert_residency.py")
         set(_v41_fixture_options)
         if(STRATA_DS41_DSPARK)
             list(APPEND _v41_fixture_options --dspark-built)
