@@ -425,6 +425,28 @@ experts retain a synchronized activation readback. Layers served entirely
 on the GPU can omit that readback and the tier's activation upload.
 `STRATA_X_HOST=1` forces the tier's host staging for diagnostics.
 
+For persistent multi-GPU expert execution, two additional decode-only opt-ins
+are independent:
+
+- `STRATA_MOE_DEVICE_INPUT=1`, together with `STRATA_DEVICE_ACTIVATIONS=1`,
+  bypasses the runner's device-to-host activation bounce. The owning GPU
+  quantizes a local input directly, or first copies a remote input into its
+  existing activation buffer on the tier stream.
+- `STRATA_MOE_PEER_OUTPUT=1` copies a remote routed output on the tier stream
+  immediately after its weighted reduction, before the existing completion
+  wait. This replaces the separate runner copy and its second host wait.
+
+Both default to off. They do not change routing, expert arithmetic, prompt
+batching or verification. Device inputs must already be ready before entry
+(the dense router synchronizes its nonblocking producer stream); outputs
+are ready for an independent consumer stream when the call returns. Neither
+path relies on default-stream ordering or kernels dereferencing peer memory.
+`test_ds41_runner --cuda` covers nonzero local/remote decode, pinned tails,
+explicit seeds including a zero-resident GPU, changed inputs, nonblocking
+producer/consumer streams and device-context restoration. Run the fixture
+with neither flag, each flag alone and both flags, after reserving its GPUs.
+These are performance candidates, not measured throughput claims.
+
 The opt-in prints skipped dense activation bytes and decode-tier input
 transfer counters. These count only activation transfers, not expert weights,
 router data or routed outputs. `STRATA_DUMP_DECODE_LOGITS=PATH` optionally
