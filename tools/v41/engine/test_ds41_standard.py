@@ -154,12 +154,21 @@ def main():
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--dspark-built", action="store_true")
     parser.add_argument("--rollback-test", action="store_true")
+    parser.add_argument("--span-cache-test", action="store_true")
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     directory = args.work.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     try:
-        model, config_path, config = fixture(directory, nonzero=args.rollback_test)
+        model, config_path, config = fixture(directory, nonzero=args.rollback_test or args.span_cache_test)
+        if args.span_cache_test:
+            result = subprocess.run([str(args.engine.resolve()), "--span-cache-test", str(model)],
+                                    env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),
+                                    text=True, capture_output=True, timeout=180)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            print(result.stdout, end="")
+            return
         if args.rollback_test:
             result = subprocess.run([str(args.engine.resolve()), "--rollback-test", str(model)],
                                     env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),

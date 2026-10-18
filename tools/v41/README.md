@@ -310,6 +310,30 @@ logits or model quality. Full integration still needs dense/attention/KV
 ownership, inter-layer activation transfers, mixed-checkpoint validation,
 end-to-end reference checks and a same-day single-device benchmark.
 
+## Optional prompt-span caches
+
+`STRATA_DS41_PREFILL_GRAPH_CACHE=1` reuses the layer-major prompt batch's
+init and finish graphs. These graphs depend on the column offset and span
+length, not on the layer, token ids, position or compressed-attention cap.
+An LRU cache owns at most 128 graph contexts, each sized for 256 tensors
+and one 64-node graph. Column reallocation clears it and the allocator's
+graph metadata; eviction removes the entry's allocator metadata before
+freeing its context. Attention/router graphs are not cached. The existing
+`DS41_GRAPH_REUSE=0` switch still disables allocator reuse.
+
+`STRATA_DS41_PREFILL_ROW_CACHE=1` separately uploads a span's column-local
+window and compressor row maps only once per prompt batch. Shared
+ring-slot maps still upload on every span switch. The memo has one integer
+per sub-batch and resets whenever inputs or columns change; changed ids,
+positions, tails and compressed-attention caps do not reuse old inputs.
+
+Both switches default to **off**. They leave decode and the normal Strata
+engine unchanged. `ctest --test-dir BUILD -R '^ds41_span_cache$' -V` compares
+default-off, graph-only, row-only and both-on execution bitwise on a
+nonzero CPU fixture: routing inputs/ids/weights, state and logits, including
+repeated and changed shapes, column resizing, compression boundaries and
+LRU eviction. No real-model GPU speedup is claimed by this fixture.
+
 ## Optional native expert batch tiles
 
 `ds41_generate --experts gpu --chunk-batch` opts prompt chunks into a
