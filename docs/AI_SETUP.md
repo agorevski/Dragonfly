@@ -11,6 +11,20 @@ from source.
 
 Work through the steps in order. Tell the user what you are doing in plain words; they may not be technical.
 
+> **If the user explicitly requests DeepSeek V4.1 Flash 1017:** use
+> [tools/v41/README.md](../tools/v41/README.md) instead of the Qwen setup steps below.
+> This is a standalone, opt-in engine and isolated serving adapter, experimental on Linux x86-64 with CPU
+> or one NVIDIA CUDA GPU only (no vision or multi-GPU serving). `setup.py` has no DeepSeek family;
+> do not pass DeepSeek through normal setup or launch it with `serve/server.py`.
+> The input is the 10-shard Q2_K GGUF (~247 GiB) from
+> [mrfakename/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF),
+> plus matching config and tokenizer from
+> [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017).
+> Raw safetensors are not direct engine input. Do not use the Qwen memory estimates or measurements below
+> to decide whether DeepSeek fits. Short Q2_K checkpoint generation and streaming smoke tests passed on one
+> Quadro RTX 8000, not a quality or throughput benchmark. Keep the normal Qwen defaults unless the user
+> explicitly opts into this port.
+
 ## 0. Ground rules
 
 - **Never expose the server without an API key.** Keep the default (`--access local`, the server listens on
