@@ -213,6 +213,113 @@ device input transferred zero activation bytes in either direction.
 Mixed and no-cache CPU cases retained 16,384 bytes in each direction.
 These are input-transfer counts, not a model-throughput measurement.
 
+## Synthetic graph and transfer diagnostics
+
+`test_ds41_graphs` checks the composite activation rounding against an independent
+format-code reference, then replays changed inputs and nonfinite blocks.
+`test_ds41_tier_profile` uses four generated, nonzero 256-by-256 Q2_K or Q3_K
+experts, two resident slots, and changing routes/activations. It checks against
+the CPU tier (relative L2 below 0.05 for different activation quantizers) and
+requires byte-identical repeated outputs. Neither executable loads a checkpoint.
+Without `--cuda`, both run on CPU without probing a GPU.
+
+Stock ggml CUDA capture is an isolated build opt-in, off by default:
+
+```sh
+cmake -S tools/v41 -B build-ds41-graphs \
+  -DCMAKE_BUILD_TYPE=Release -DSTRATA_DS41_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75 \
+  -DSTRATA_DS41_CUDA_GRAPHS=ON -DSTRATA_DS41_CUDA_BUILD_JOBS=2
+cmake --build build-ds41-graphs \
+  --target test_ds41_graphs test_ds41_tier_profile --parallel 2
+ctest --test-dir build-ds41-graphs -R 'ds41_(graphs|tier_profile)$' --output-on-failure
+```
+
+Select an available GPU explicitly. Compare eager versus captured composite ops
+in the **same binary**; the stock disable variable is presence-based (even `0`
+disables capture):
+
+```sh
+CUDA_VISIBLE_DEVICES=3 GGML_CUDA_DISABLE_GRAPHS=1 \
+  build-ds41-graphs/test_ds41_graphs --cuda --bench
+env -u GGML_CUDA_DISABLE_GRAPHS CUDA_VISIBLE_DEVICES=3 \
+  build-ds41-graphs/test_ds41_graphs --cuda --bench
+```
+
+Compare existing expert-tier switches separately:
+
+```sh
+env -u STRATA_TIER_GRAPH -u STRATA_DMA_OVERLAP CUDA_VISIBLE_DEVICES=3 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+env -u STRATA_DMA_OVERLAP CUDA_VISIBLE_DEVICES=3 STRATA_TIER_GRAPH=1 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+env -u STRATA_TIER_GRAPH CUDA_VISIBLE_DEVICES=3 STRATA_DMA_OVERLAP=1 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+CUDA_VISIBLE_DEVICES=3 STRATA_TIER_GRAPH=1 STRATA_DMA_OVERLAP=1 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+```
+
+The two output digests should match across all four tier runs; a capture-refusal
+message means the tier graph fell back, not that capture was measured. Each
+timing reports 20 warmups and seven batches of 64 calls. `wall_sync` includes
+completed calls; `event_submission` is an event-bracketed **submission envelope**,
+not isolated kernel time. Explicit completion boundaries order the backend's
+private nonblocking streams before the stop event. Tier timings include output
+copy/checks, metadata, activation quantization and host reduction. Each measured
+CUDA tier run requires 448 resident hits and 448 pinned-arena PCIe misses with no CPU
+or file-tier work. The fakequant graph reports its node count and scratch bytes.
+These small synthetic results are not model latency, large-transfer bandwidth,
+or evidence to change a default.
+
+No fused fakequant kernel is installed. The composite deliberately separates
+rounding operations; reassociation or FMA contraction must not remove their
+intermediate F32 rounding. Stock ggml's public CUDA interface does not expose its
+compute stream or a CUDA custom-op registration hook. A local fused path first
+needs a supported launch/stream integration point inside the cached attention
+graph, plus bit-exact validation at each intermediate F32 rounding boundary.
+Launching on the default stream or removing synchronization is not a substitute.
+
+Measured on 2026-10-18: Quadro RTX 8000 (48 GiB, SM75), driver 580.178.04,
+CUDA 13.4, GCC 13.3, Xeon W-2295. Same graph-enabled binary, one ordered
+eager/capture sweep; median microseconds per completed composite call
+(`wall_sync`, with submission-envelope event medians in parentheses):
+
+| Composite mode | Elements | Eager us | Captured us |
+| --- | ---: | ---: | ---: |
+| FP8 power-of-two scale | 512 | 81.006 (81.106) | 46.063 (46.145) |
+| FP8 power-of-two scale | 32768 | 88.709 (88.800) | 53.725 (53.823) |
+| FP4 E4M3 scale | 512 | 107.942 (108.064) | 62.410 (62.500) |
+| FP4 E4M3 scale | 32768 | 109.009 (109.115) | 67.181 (67.276) |
+| FP4 power-of-two scale | 512 | 79.741 (79.835) | 46.711 (46.816) |
+| FP4 power-of-two scale | 32768 | 79.604 (79.712) | 54.043 (54.125) |
+
+All three modes passed the independent finite reference and nonfinite replay
+checks in both settings. Stock capture reduces this synthetic launch overhead;
+it does not fuse the rounding operations. Scratch allocations were at most
+540672 bytes per graph.
+
+The same day's tier sweep gave these median microseconds per call (wall,
+with submission-envelope event medians in parentheses):
+
+| Existing switches | Q2_K us | Q3_K us |
+| --- | ---: | ---: |
+| Neither | 57.841 (58.003) | 59.487 (59.614) |
+| Tier graph only | 57.007 (57.118) | 58.928 (59.135) |
+| DMA overlap only | 57.909 (58.033) | 57.527 (57.647) |
+| Both | 52.517 (52.634) | 54.272 (54.393) |
+
+All four runs matched digests `890bc232eb7bf106` (Q2_K) and
+`040deed8d94e04b0` (Q3_K), with the required hit/PCIe counters and no
+capture-refusal fallback. CPU-reference relative L2 maxima were 0.032147 and
+0.038924, respectively; replay comparisons on the GPU were byte-identical.
+These are tiny 64512/84480-byte expert transfers, not model-size DMA.
+The four settings ran in the displayed order, not an interleaved randomized
+trial. No checkpoint, end-to-end generation, or other GPU/backend was tested;
+the measurements do not justify changing any default. CPU CTest passed 3/3
+(including the existing cache regression); CUDA-build diagnostic CTest passed
+4/4. Only build/test/documentation files changed, not the dense/tier runner
+or global ggml/Strata sources.
+
 ## Serve through the isolated adapter
 
 The adapter reuses Strata's HTTP server in a separate process with V4.1
