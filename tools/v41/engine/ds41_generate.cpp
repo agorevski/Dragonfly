@@ -402,6 +402,8 @@ int main(int argc, char ** argv) {
     mc.cpu_only = a.experts == "cpu" || ggml_backend_is_cpu(be);
     mc.slots = a.slots > 0 ? a.slots : TG.n_layers * TG.n_experts;
     mc.slot_gib = a.slots > 0 ? 0.0 : slot_gib;
+    mc.no_cache = a.slots <= 0 && slot_gib <= 0;
+    mc.defer_cache = !mc.cpu_only && (a.prefill_chunk > 1 || a.prompt_batch > 1);
     mc.pcie_frac = a.pcie;
     mc.pf_b = a.pf_b;   // predicted prefetch (Ds41Dense::predict -> tier.prefetch), experts per layer
     mc.threads = a.threads;
@@ -439,7 +441,7 @@ int main(int argc, char ** argv) {
     // defer the VRAM cache: the prompt's chunk + graph buffers (~4 GiB) use that VRAM first, then the cache opens into
     // it (measured) - the old fixed --vram-margin had to cover prefill and starved decode of slots.  --serve does this
     // per request: a multi-token prompt closes the cache (release_cache), the decode after it re-seeds (~0.6 s)
-    const bool defer_vram = !mc.cpu_only && (a.prefill_chunk > 1 || a.prompt_batch > 1);
+    const bool defer_vram = mc.defer_cache;
     std::vector<std::pair<int32_t, int32_t>> ranked;
     if (!mc.cpu_only) {
         if (!a.rank.empty()) {
@@ -454,9 +456,10 @@ int main(int argc, char ** argv) {
             std::fprintf(stderr, "ds41_generate: seed: %s\n", err.c_str());
             return 1;
         }
-        std::fprintf(stderr, "tier: %lld experts in VRAM, %lld in the RAM arena (%.1f GiB), %lld file tier; seeded in %.1f s\n",
+        std::fprintf(stderr, "tier: %lld experts in VRAM, %lld in the RAM arena (%.1f GiB), %lld file tier; seeded in %.1f s; "
+                             "%lld cache slots allocated\n",
                      (long long) tier.resident(), (long long) tier.arena_experts(), tier.arena_gib(), (long long) tier.file_tier(),
-                     (now_ms() - t0) / 1000.0);
+                     (now_ms() - t0) / 1000.0, (long long) tier.cache_slots());
     }
     // the selection-only bias per layer: the prune penalty / mask, + route_bias on the experts resident in VRAM now
     std::vector<char> proxy_res;   // --bias-prompt: the would-be VRAM set (first N ranked) until the real seed

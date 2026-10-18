@@ -568,6 +568,14 @@ struct Ds41MoeImpl {
 
 #if defined(DS4_MOE_CUDA)
 int64_t persistent_cache_stride(const Ds41MoeImpl & im);
+
+int64_t uniform_cache_slots(const Ds41MoeImpl& im) {
+    const int64_t slots = std::max<int64_t>(0, im.cfg.slots);
+    if (im.cfg.no_cache) return 0;
+    if (im.cfg.slot_gib <= 0) return slots;
+    const int64_t stride = (persistent_cache_stride(im) + 255) / 256 * 256;   // ExpertCache::open_sized alignment
+    return (int64_t) std::min((double) slots, std::floor(im.cfg.slot_gib * 1073741824.0 / (double) stride));
+}
 #endif
 
 void rebal_count(Ds41MoeImpl& im, int64_t layer, const int32_t* ids, int64_t n);   // defined with rebalance_*
@@ -1382,9 +1390,13 @@ bool Ds41MoeTier::init(const Ds41MoeGeom& geom, Ds41BlobSource* blobs, const Ds4
     }
     // a geometry whose blob size varies per layer opens its cache at the seed, sized to the ranked experts
     if (!cfg.no_cache && cfg.slots > 0 && !im_->mixed_sizes && !cfg.defer_cache) {   // defer_cache: opened at the seed
-        std::vector<int64_t> sizes((size_t) cfg.slots, persistent_cache_stride(*im_));
-        gp.cache.reset(new strata::core::ExpertCache());
-        if (!gp.cache->open_sized(sizes, geom.n_layers, geom.n_experts, err)) return false;
+        const int64_t slots = uniform_cache_slots(*im_);
+        if (slots > 0) {
+            std::vector<int64_t> sizes((size_t) slots, persistent_cache_stride(*im_));
+            auto cache = std::make_unique<strata::core::ExpertCache>();
+            if (!cache->open_sized(sizes, geom.n_layers, geom.n_experts, err)) return false;
+            gp.cache = std::move(cache);
+        }
     }
     // NO ARENA HERE.  The arena is 52-73 GiB of the real model and it is ORDERED (build_arena): building it twice -
     // once in index order here, once from the profile when the caller seeds - would read the file twice and page
@@ -1404,8 +1416,12 @@ std::vector<std::pair<int32_t, int32_t>> arena_order(const Ds41MoeImpl& im, cons
     std::vector<char> res((size_t) (im.g.n_layers * im.g.n_experts), 0);
     double used = 0;
     int64_t n = 0;
+    int64_t slots = im.cfg.slots;
+#if defined(DS4_MOE_CUDA)
+    if (!im.mixed_sizes) slots = uniform_cache_slots(im);
+#endif
     for (const auto& le : ranked) {
-        if (n >= im.cfg.slots) break;
+        if (n >= slots) break;
         if (!im.g.routed(le.first) || le.second < 0 || le.second >= im.g.n_experts) continue;
         char& r = res[(size_t) (le.first * im.g.n_experts + le.second)];
         if (r) continue;
@@ -1640,18 +1656,23 @@ bool Ds41MoeTier::seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>
             used += (double) b;
         }
         if (!sizes.empty()) {
-            im_->gpu->cache.reset(new strata::core::ExpertCache());
-            if (keep_cache_mode()) im_->gpu->cache->set_segment_bytes((int64_t) 64 << 20);   // shrink_cache_for
-            if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+            auto cache = std::make_unique<strata::core::ExpertCache>();
+            if (keep_cache_mode()) cache->set_segment_bytes((int64_t) 64 << 20);   // shrink_cache_for
+            if (!cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+            im_->gpu->cache = std::move(cache);
         }
     }
-    // uniform blobs with defer_cache: the cache opens now (after the prompt chunks gave their VRAM back)
-    if (!im_->mixed_sizes && im_->cfg.defer_cache && im_->gpu && !im_->gpu->cache && !im_->cfg.no_cache &&
+    // A deferred or released uniform cache opens with the current byte budget, not the model's expert count.
+    if (!im_->mixed_sizes && im_->gpu && !im_->gpu->cache && !im_->cfg.no_cache &&
         im_->cfg.slots > 0) {
-        std::vector<int64_t> sizes((size_t) im_->cfg.slots, im_->blob);
-        im_->gpu->cache.reset(new strata::core::ExpertCache());
-        if (keep_cache_mode()) im_->gpu->cache->set_segment_bytes((int64_t) 64 << 20);
-        if (!im_->gpu->cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+        const int64_t slots = uniform_cache_slots(*im_);
+        if (slots > 0) {
+            std::vector<int64_t> sizes((size_t) slots, persistent_cache_stride(*im_));
+            auto cache = std::make_unique<strata::core::ExpertCache>();
+            if (keep_cache_mode()) cache->set_segment_bytes((int64_t) 64 << 20);
+            if (!cache->open_sized(sizes, im_->g.n_layers, im_->g.n_experts, err)) return false;
+            im_->gpu->cache = std::move(cache);
+        }
     }
     if (!im_->gpu || !im_->gpu->cache) return true;   // no cache: nothing to seed
     const int64_t want = std::min<int64_t>(im_->cfg.slots, im_->gpu->cache->full_slots());
@@ -5261,6 +5282,13 @@ const char* Ds41MoeTier::mode() const {
 }
 
 int64_t Ds41MoeTier::resident() const { return im_->admitted; }
+int64_t Ds41MoeTier::cache_slots() const {
+#if defined(DS4_MOE_CUDA)
+    return im_->gpu && im_->gpu->cache ? im_->gpu->cache->full_slots() : 0;
+#else
+    return 0;
+#endif
+}
 int64_t Ds41MoeTier::blob_bytes(int64_t layer) const {
     if (layer < 0 || layer >= (int64_t) im_->bl.size()) return 0;
     return im_->bl[(size_t) layer];

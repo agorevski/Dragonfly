@@ -14,15 +14,16 @@ def string(value):
     return struct.pack("<Q", len(data)) + data
 
 
-def fixture(directory):
+def fixture(directory, gpu_experts=False):
+    dim = 256 if gpu_experts else 128
     prefix = "deepseek41."
     metadata = {"general.architecture": "deepseek41"}
     integers = {
-        "embedding_length": 128, "block_count": 2, "attention.head_count": 1,
+        "embedding_length": dim, "block_count": 2, "attention.head_count": 1,
         "attention.key_length": 64, "rope.dimension_count": 16,
-        "attention.q_lora_rank": 128, "attention.output_lora_rank": 64,
+        "attention.q_lora_rank": dim, "attention.output_lora_rank": 64,
         "attention.output_group_count": 1, "attention.sliding_window": 4,
-        "expert_count": 2, "expert_used_count": 1, "expert_feed_forward_length": 128,
+        "expert_count": 2, "expert_used_count": 1, "expert_feed_forward_length": dim,
         "expert_shared_count": 1, "hyper_connection.count": 4,
         "hyper_connection.sinkhorn_iterations": 4, "attention.indexer.head_count": 32,
         "attention.indexer.key_length": 128, "attention.indexer.top_k": 1,
@@ -50,7 +51,7 @@ def fixture(directory):
     })
     config = {
         "candidate_source_layer_id": 0, "candidate_topk_blocks": 1,
-        "candidate_block_size": 2, "hidden_size": 128, "num_hidden_layers": 2,
+        "candidate_block_size": 2, "hidden_size": dim, "num_hidden_layers": 2,
         "n_routed_experts": 2, "vocab_size": 4, "engram_head_dim": 32,
         "engram_n_heads": 1, "engram_max_ngram_size": 3, "swiglu_limit": 10.,
     }
@@ -62,40 +63,43 @@ def fixture(directory):
             count *= dim
         if type_id == 8:
             payload = bytes(count // 32 * 34)
+        elif type_id in (10, 11):
+            payload = bytes(count // 256 * (84 if type_id == 10 else 110))
         else:
             value = 1. if "norm" in name or "engram_q." in name or "engram_k." in name else 0.
             payload = struct.pack("<f", value) * count
         tensors.append((name, shape, type_id, payload))
 
-    add("token_embd.weight", [128, 4])
-    add("output_norm.weight", [128])
-    add("output.weight", [128, 4])
+    add("token_embd.weight", [dim, 4])
+    add("output_norm.weight", [dim])
+    add("output.weight", [dim, 4])
     for layer in range(2):
         base = f"blk.{layer}."
         for site in ("attn", "ffn"):
-            add(base + f"hc_{site}_fn.weight", [512, 24])
+            add(base + f"hc_{site}_fn.weight", [4 * dim, 24])
             add(base + f"hc_{site}_base.weight", [24])
             add(base + f"hc_{site}_scale.weight", [3])
-            add(base + f"{site}_norm.weight", [128])
+            add(base + f"{site}_norm.weight", [dim])
         for name, shape in (
-            ("attn_sinks", [1]), ("attn_q_a", [128, 128]), ("attn_q_b", [128, 64]),
-            ("attn_q_a_norm", [128]), ("attn_kv", [128, 64]), ("attn_kv_a_norm", [64]),
-            ("attn_output_a", [64, 64]), ("attn_output_b", [64, 128]),
-            ("ffn_gate_inp", [128, 2]),
-            ("ffn_gate_shexp", [128, 128]), ("ffn_up_shexp", [128, 128]),
-            ("ffn_down_shexp", [128, 128]),
-            ("ffn_gate_exps", [128, 128, 2]), ("ffn_up_exps", [128, 128, 2]),
-            ("ffn_down_exps", [128, 128, 2]),
+            ("attn_sinks", [1]), ("attn_q_a", [dim, dim]), ("attn_q_b", [dim, 64]),
+            ("attn_q_a_norm", [dim]), ("attn_kv", [dim, 64]), ("attn_kv_a_norm", [64]),
+            ("attn_output_a", [64, 64]), ("attn_output_b", [64, dim]),
+            ("ffn_gate_inp", [dim, 2]),
+            ("ffn_gate_shexp", [dim, dim]), ("ffn_up_shexp", [dim, dim]),
+            ("ffn_down_shexp", [dim, dim]),
+            ("ffn_gate_exps", [dim, dim, 2]), ("ffn_up_exps", [dim, dim, 2]),
+            ("ffn_down_exps", [dim, dim, 2]),
         ):
-            add(base + name + ".weight", shape)
+            type_id = (11 if "down" in name else 10) if gpu_experts and "_exps" in name else 0
+            add(base + name + ".weight", shape, type_id)
         add(base + "exp_probs_b.bias", [2])
         add(base + "exp_probs_b_vl.bias", [2])
     for name, shape in (
-        ("attn_compressor_kv", [128, 64]), ("attn_compressor_norm", [64]),
-        ("attn_compressor_gate", [128, 64]), ("indexer.attn_k", [64, 128]),
-        ("indexer.k_norm", [128]), ("indexer.attn_q_b", [128, 4096]),
-        ("indexer.proj", [128, 32]), ("engram_q", [128, 4]),
-        ("engram_k", [128, 4]), ("engram_wkv", [64, 640]),
+        ("attn_compressor_kv", [dim, 64]), ("attn_compressor_norm", [64]),
+        ("attn_compressor_gate", [dim, 64]), ("indexer.attn_k", [64, 128]),
+        ("indexer.k_norm", [128]), ("indexer.attn_q_b", [dim, 4096]),
+        ("indexer.proj", [dim, 32]), ("engram_q", [dim, 4]),
+        ("engram_k", [dim, 4]), ("engram_wkv", [64, 5 * dim]),
     ):
         add("blk.0." + name + ".weight", shape)
     add("blk.0.engram_embd.weight", [32, 12], 8)
@@ -157,6 +161,30 @@ def main():
             raise AssertionError(result.stdout + result.stderr)
         if len(result.stdout.split()) != 2:
             raise AssertionError("Expected two generated token IDs: " + result.stdout + result.stderr)
+        if args.backend == "cuda":
+            expert_directory = directory / "gpu-experts"
+            expert_directory.mkdir()
+            expert_model, expert_config, _ = fixture(expert_directory, gpu_experts=True)
+            expert_env = dict(env, STRATA_V41_CONFIG=str(expert_config))
+            expert_command = command.copy()
+            expert_command[expert_command.index("-m") + 1] = str(expert_model)
+            expert_command[expert_command.index("--experts") + 1] = "gpu"
+            expert_command += ["--arena-gib", "0", "--pf-b", "0", "--pcie", "0"]
+            for deferred in (False, True):
+                for slots, margin, capacity in (("auto", "10000", 0), ("auto", "0", 4), ("1", "0", 1)):
+                    extra = ["--slots", slots, "--vram-margin", margin]
+                    if deferred:
+                        extra += ["--prompt-batch", "2", "--prefill-chunk", "2"]
+                    result = subprocess.run(
+                        expert_command + extra, env=expert_env, text=True, capture_output=True, timeout=60,
+                    )
+                    initial_capacity = 0 if deferred else capacity
+                    if (result.returncode or len(result.stdout.split()) != 2 or
+                            f"{initial_capacity} cache slots allocated" not in result.stderr):
+                        raise AssertionError("GPU expert cache allocation failed: " + result.stdout + result.stderr)
+                    if deferred and f"{capacity} experts in VRAM (" not in result.stderr:
+                        raise AssertionError("Deferred GPU expert cache seed failed: " + result.stderr)
+            print("GPU expert launcher: auto, explicit, zero budget and deferred prompt allocation passed")
         for extra, message in (
             (["--chunk-mmq"], "--chunk-mmq is unavailable"),
             (["--expert-gpus", "0,1"], "unknown argument --expert-gpus"),
