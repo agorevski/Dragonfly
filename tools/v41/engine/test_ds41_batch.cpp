@@ -97,7 +97,8 @@ static void chunk_dispatch(const std::vector<uint8_t>& blobs, size_t bytes,
     }
 }
 
-static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng, bool dispatch = true) {
+static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng,
+                bool dispatch = true, int gu_mode = -1) {
     constexpr int H = 5120, FF = 2304, NG = 3;
     // One empty group, nonzero entry offset, unequal lengths, and nonidentity routing.
     const int count = 2 * per + 1, cap = count + 2, ntok = per + 2;
@@ -133,6 +134,7 @@ static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng, bool di
     CK(cudaMemcpy(x.p, inputs.data(), inputs.size() * 4, cudaMemcpyHostToDevice));
     k::quantize_q8_1_rows(x.as<float>(), ntok, H, xq.p, nullptr);
     auto launch = [&](bool batch) {
+        if (gu_mode >= 0) k::native_expert_set_mode(batch ? 0 : gu_mode, 0);
         if (batch) REQUIRE(k::native_expert_batch(L, ptr.as<unsigned long long>(), start.as<int32_t>(),
             num.as<int32_t>(), dst.as<int32_t>(), tok.as<int32_t>(), NG, cap, per + 1,
             xq.p, scratch.p, out.as<float>(), nullptr));
@@ -228,7 +230,17 @@ static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng, bool di
 int main(int argc, char** argv) {
     const bool quick = argc == 2 && std::strcmp(argv[1], "--quick") == 0;
     const bool probe = argc == 2 && std::strcmp(argv[1], "--probe") == 0;
-    REQUIRE(argc == 1 || quick || probe);
+    const bool gu_layouts = argc == 2 && std::strcmp(argv[1], "--gu-layouts") == 0;
+    REQUIRE(argc == 1 || quick || probe || gu_layouts);
+    if (gu_layouts) {
+        REQUIRE(!std::getenv("STRATA_EXP_MODE_T10") && !std::getenv("STRATA_EXP_MODE_T11"));
+        // Isolate GU changes: retain the default Q3_K down projection for both sides of the comparison.
+#ifdef _WIN32
+        REQUIRE(_putenv_s("STRATA_EXP_MODE_T11", "0") == 0);
+#else
+        REQUIRE(setenv("STRATA_EXP_MODE_T11", "0", 1) == 0);
+#endif
+    }
     int devices = 0;
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) return 77;
     cudaDeviceProp p;
@@ -263,6 +275,17 @@ int main(int argc, char** argv) {
         for (int gt : {10, 11})
             for (int ut : {10, 11}) run(gt, ut, 9, true, rng, false);
         std::puts("PASS: bounded mixed-format batch probe");
+        return 0;
+    }
+    if (gu_layouts) {
+        for (int mode : {2, 4}) {
+            std::printf("Q2_K GU rows/warp mode=%d vs unchanged batch oracle\n", mode);
+            for (int per : {1, 3, 7}) run(10, 10, per, per == 7, rng, true, mode);
+            run(10, 11, 3, true, rng, true, mode);
+            run(11, 10, 3, true, rng, true, mode);
+        }
+        k::native_expert_set_mode(-1, 0);
+        std::puts("PASS: full-width Q2_K GU layout modes and mixed-format fallback");
         return 0;
     }
     for (int per : {1, 3, 4, 7, 8, 9, 32, 128})
