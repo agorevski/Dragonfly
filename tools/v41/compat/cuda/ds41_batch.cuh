@@ -99,6 +99,47 @@ __global__ void ds41_batch_rows(const NativeExpertLayout L, const unsigned long 
     }
 }
 
+// One CTA owns a complete 32-row q8 block for each token. Dot products keep the
+// unfused kernel's warp reduction; only the FP32 gate/up memory roundtrip is removed.
+template<int GT, int UT>
+__global__ void ds41_batch_fused_gu(const NativeExpertLayout L, const unsigned long long* grp_ptr,
+                                   const int32_t* grp_start, const int32_t* n_groups,
+                                   const int32_t* ent_tok, const block_q8_1* xq, block_q8_1* hq) {
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int e = grp_start[g] + blockIdx.z * DS41_BATCH_COLS;
+    const int n = min(DS41_BATCH_COLS, grp_start[g + 1] - e);
+    if (n <= 0) return;
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const int r0 = blockIdx.x * 32;
+    __shared__ float hidden[DS41_BATCH_COLS][32];
+    int off[DS41_BATCH_COLS];
+#pragma unroll
+    for (int c = 0; c < DS41_BATCH_COLS; ++c)
+        off[c] = ent_tok[e + min(c, n - 1)] * (L.n_embd / 32);
+    const auto* weights = (const uint8_t*) grp_ptr[g];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int r = r0 + warp + j * 8;
+        float gate[DS41_BATCH_COLS], up[DS41_BATCH_COLS];
+        ds41_batch_dot<GT>(weights + (size_t) r * L.gu_row, xq, off, n,
+                           L.n_embd / 256, lane, gate);
+        const size_t ur = L.up_type < 0 ? L.gu_row : L.up_row;
+        ds41_batch_dot<UT>(weights + L.up_off + (size_t) r * ur, xq, off, n,
+                           L.n_embd / 256, lane, up);
+#pragma unroll
+        for (int c = 0; c < DS41_BATCH_COLS; ++c)
+            if (c < n && lane == c) {
+                const float cg = fminf(gate[c], L.swiglu_limit);
+                const float cu = fminf(fmaxf(up[c], -L.swiglu_limit), L.swiglu_limit);
+                hidden[c][warp + j * 8] = __fmul_rn(cg / (1.0f + __expf(-cg)), cu);
+            }
+    }
+    __syncthreads();
+    if (warp < n)
+        q8_1_store(hidden[warp][lane], hq, (long long) (e + warp) * L.n_ff + r0 + lane);
+}
+
 } // namespace
 
 bool native_expert_batch_supported(const NativeExpertLayout& L) noexcept {
@@ -128,16 +169,30 @@ bool native_expert_batch(const NativeExpertLayout& L, const unsigned long long* 
     const unsigned tiles = (max_group_entries + DS41_BATCH_COLS - 1) / DS41_BATCH_COLS;
     const dim3 gu((2 * L.n_ff + 7) / 8, (unsigned) cap_groups, tiles);
     const int ut = L.up_type < 0 ? L.gu_type : L.up_type;
+    static const bool fused_gu = [] {
+        const char* v = std::getenv("STRATA_DS41_BATCH_FUSED_GU");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    if (fused_gu) {
+        const dim3 fg(L.n_ff / 32, (unsigned) cap_groups, tiles);
+#define DS41_BATCH_FUSED(G, U) ds41_batch_fused_gu<G, U><<<fg, 256, 0, s>>>(L, grp_ptr, grp_start, n_groups, ent_tok, X, hq)
+        if (L.gu_type == 10 && ut == 10) DS41_BATCH_FUSED(10, 10);
+        else if (L.gu_type == 10) DS41_BATCH_FUSED(10, 11);
+        else if (ut == 10) DS41_BATCH_FUSED(11, 10);
+        else DS41_BATCH_FUSED(11, 11);
+#undef DS41_BATCH_FUSED
+    } else {
 #define DS41_BATCH_GU(G, U) ds41_batch_rows<G, U, false><<<gu, 256, 0, s>>>(L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, out)
-    if (L.gu_type == 10 && ut == 10) DS41_BATCH_GU(10, 10);
-    else if (L.gu_type == 10) DS41_BATCH_GU(10, 11);
-    else if (ut == 10) DS41_BATCH_GU(11, 10);
-    else DS41_BATCH_GU(11, 11);
+        if (L.gu_type == 10 && ut == 10) DS41_BATCH_GU(10, 10);
+        else if (L.gu_type == 10) DS41_BATCH_GU(10, 11);
+        else if (ut == 10) DS41_BATCH_GU(11, 10);
+        else DS41_BATCH_GU(11, 11);
 #undef DS41_BATCH_GU
-    // This is the existing finite-clamp, FP32-scale -> integer -> FP16-scale quantizer.
-    const long long nh = cap_entries * L.n_ff;
-    swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(
-        gate, up, grp_start, n_groups, (int) L.n_ff, hq, L.swiglu_limit);
+        // This is the existing finite-clamp, FP32-scale -> integer -> FP16-scale quantizer.
+        const long long nh = cap_entries * L.n_ff;
+        swiglu_q8_1_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(
+            gate, up, grp_start, n_groups, (int) L.n_ff, hq, L.swiglu_limit);
+    }
     const dim3 down((L.n_embd + 7) / 8, (unsigned) cap_groups, tiles);
     ds41_batch_rows<10, 10, true><<<down, 256, 0, s>>>(
         L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, hq, gate, up, out);

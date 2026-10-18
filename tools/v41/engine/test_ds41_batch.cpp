@@ -157,10 +157,17 @@ static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng) {
         differences += std::memcmp(&ref[i], &got[i], 4) != 0;
     }
     const size_t fa = ((size_t) cap * FF * 4 + 255) & ~(size_t) 255;
-    const size_t hq_offset = 3 * fa + (size_t) FF / 32 * 36;
-    const size_t hq_bytes = (size_t) count * FF / 32 * 36;
+    const size_t hq_offset = 3 * fa;
+    const size_t hq_bytes = (size_t) cap * FF / 32 * 36;
     REQUIRE(std::memcmp(refscratch.data() + hq_offset, gotscratch.data() + hq_offset, hq_bytes) == 0);
     REQUIRE(differences == 0);
+    double output_norm = 0;
+    for (int e = starts[0]; e < starts[NG]; ++e)
+        for (int r = 0; r < H; ++r) {
+            const double v = got[(size_t) dest[e] * H + r];
+            output_norm += v * v;
+        }
+    REQUIRE(output_norm > 0);
     if (oracle) {
         double err = 0, norm = 0;
         int clamped = 0;
@@ -228,6 +235,8 @@ int main() {
     std::printf("device=%s sm=%d%d pci=%s CUDA_VISIBLE_DEVICES=%s synthetic-only <3GiB\n",
                 p.name, p.major, p.minor, bus,
                 std::getenv("CUDA_VISIBLE_DEVICES") ? std::getenv("CUDA_VISIBLE_DEVICES") : "(unset)");
+    std::printf("STRATA_DS41_BATCH_FUSED_GU=%s\n", std::getenv("STRATA_DS41_BATCH_FUSED_GU") ?
+                std::getenv("STRATA_DS41_BATCH_FUSED_GU") : "(unset; unfused)");
     auto L = k::native_expert_layout(10, 11, 5120, 2304);
     auto bad = L; bad.n_embd = 2560;
     REQUIRE(!k::native_expert_batch_supported(bad));
