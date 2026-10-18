@@ -129,10 +129,13 @@ def run_protocol(args, ids, result):
     for name, enabled in switches.items():
         if enabled:
             env[name] = "1"
+    if args.down_mode is not None:
+        env["STRATA_EXP_MODE_T11"] = str(args.down_mode)
     result["environment"] = {"CUDA_VISIBLE_DEVICES": args.gpus,
                              "STRATA_V41_CONFIG": str(args.config),
                              "STRATA_SERVE_STEP_MAX": env.get("STRATA_SERVE_STEP_MAX"),
                              **{name: env.get(name) for name in switches},
+                             "STRATA_EXP_MODE_T11": env.get("STRATA_EXP_MODE_T11"),
                              "engine_overrides": "all other STRATA_*, DS41_*, GGML_* removed"}
     start = time.monotonic()
     process = subprocess.Popen(result["command"], stdin=subprocess.PIPE,
@@ -275,6 +278,8 @@ def main():
     parser.add_argument("--chunk-batch", action="store_true", help="opt in to four-column expert kernels")
     parser.add_argument("--fused-gu", action="store_true",
                         help="opt in to fused gate/up activation and quantization; requires --chunk-batch")
+    parser.add_argument("--down-mode", type=int, choices=(0, 1, 2, 4),
+                        help="explicit Q3_K down-projection row/warp layout")
     parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
     parser.add_argument("--tier-graph", action="store_true", help="opt in to expert-tier graph capture")
     parser.add_argument("--dma-overlap", action="store_true", help="opt in to expert demand-copy overlap")
