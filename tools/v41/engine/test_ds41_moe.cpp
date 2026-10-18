@@ -66,9 +66,102 @@ double rel(const std::vector<float> & a, const std::vector<float> & b) {
     return std::sqrt(num / std::max(den, 1e-30));
 }
 
+int cache_test(bool gpu) {
+    std::string err;
+    for (int type : {10, 11}) {   // standard Q2_K and Q3_K uniform experts
+        Ds41MoeGeom g;
+        g.n_embd = g.n_ff = 256;
+        g.n_layers = 2;
+        g.n_experts = 4;
+        g.top_k = 1;
+        g.gu_type = g.d_type = type;
+        cpu::NativeFmt fmt;
+        if (!ds41_moe_blob_layout(g, fmt, err)) {
+            std::fprintf(stderr, "cache fixture layout: %s\n", err.c_str());
+            return 1;
+        }
+        Ds41MemoryBlobs src(g, fmt.bytes);
+        std::vector<uint8_t> blob(fmt.bytes, 0);
+        std::vector<std::pair<int32_t, int32_t>> ranked;
+        for (int l = 0; l < g.n_layers; ++l)
+            for (int e = 0; e < g.n_experts; ++e) {
+                src.set(l, e, blob.data());
+                ranked.emplace_back(l, e);
+            }
+        const double one_gib = (double) fmt.bytes / 1073741824.0;
+        for (bool defer : {false, true}) {
+            for (int mode = 0; mode < 4; ++mode) {
+                Ds41MoeConfig cfg;
+                cfg.cpu_only = !gpu;
+                cfg.threads = 2;
+                cfg.arena_gib = cfg.max_arena_gib = 0;
+                cfg.pcie_frac = cfg.pf_b = 0;
+                cfg.defer_cache = defer;
+                cfg.slots = mode == 1 ? 3 : g.n_layers * g.n_experts;
+                cfg.slot_gib = mode == 0 ? 2.5 * one_gib : mode == 2 ? 0.5 * one_gib : 0;
+                cfg.no_cache = mode == 3;   // auto with zero available VRAM must not use slot_gib=0 alone
+                const int64_t want = mode == 0 ? 2 : mode == 1 ? 3 : 0;
+                Ds41MoeTier tier;
+                auto capacity = [&](int64_t slots, int64_t resident) {
+                    if (!gpu) slots = resident = 0;
+                    if (tier.cache_slots() == slots && tier.resident() == resident) return true;
+                    std::fprintf(stderr, "cache type=%d defer=%d mode=%d: slots %lld/%lld, resident %lld/%lld\n",
+                                 type, defer, mode, (long long) tier.cache_slots(), (long long) slots,
+                                 (long long) tier.resident(), (long long) resident);
+                    return false;
+                };
+                if (!tier.init(g, &src, cfg, err) || !capacity(defer ? 0 : want, 0) ||
+                    !tier.seed_from_ranked(ranked, err) || !capacity(want, want)) {
+                    std::fprintf(stderr, "cache init/seed: %s\n", err.c_str());
+                    return 1;
+                }
+                std::vector<float> x((size_t) g.n_embd, 0), out(x.size(), 1);
+                const float w = 1;
+                for (int32_t e : {0, 3}) {
+                    if (!tier.run(0, &e, &w, x.data(), out.data())) {
+                        std::fprintf(stderr, "cache fixture run failed\n");
+                        return 1;
+                    }
+                    for (float v : out) if (v != 0) {
+                        std::fprintf(stderr, "cache fixture output is not zero\n");
+                        return 1;
+                    }
+                }
+                const int64_t hits = gpu && want > 0 ? 1 : 0;
+                if (tier.stats().hits != hits || tier.stats().cpu + tier.stats().pcie != 2 - hits) {
+                    std::fprintf(stderr, "cache fixture expected %lld hits, got %lld hits, %lld CPU, %lld PCIe\n",
+                                 (long long) hits, (long long) tier.stats().hits,
+                                 (long long) tier.stats().cpu, (long long) tier.stats().pcie);
+                    return 1;
+                }
+                tier.release_cache();
+                if (!capacity(0, 0)) return 1;
+                const int64_t reopened = mode == 0 ? 1 : want;
+                if (mode == 0) tier.set_slot_gib(1.5 * one_gib);
+                if (!tier.seed_from_ranked(ranked, err) || !capacity(reopened, reopened)) {
+                    std::fprintf(stderr, "cache reopen: %s\n", err.c_str());
+                    return 1;
+                }
+                tier.release_cache();
+                tier.set_cache_enabled(false);
+                tier.set_slot_gib(0);
+                if (!tier.seed_from_ranked(ranked, err) || !capacity(0, 0)) return 1;
+                tier.set_cache_enabled(true);
+                tier.set_slot_gib(2.5 * one_gib);
+                if (!tier.seed_from_ranked(ranked, err) || !capacity(2, 2)) return 1;
+            }
+        }
+    }
+    std::printf("uniform cache (%s): byte budget, explicit slots, deferred seed, release/reopen and no-room passed\n",
+                gpu ? "CUDA" : "CPU");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "--cache-test")
+        return cache_test(argc >= 3 && std::string(argv[2]) == "--gpu");
     if (argc < 2) { std::fprintf(stderr, "usage: test_ds41_moe <file.gguf> [--layers 0,1] [--tokens 8] [--gpu] [--chunk N] [--chunk-mmq]\n"); return 2; }
     std::string path = argv[1];
     int nchunk = 0;   // --chunk N: also N tokens at once through run_chunk (the prompt path), each row vs the reference

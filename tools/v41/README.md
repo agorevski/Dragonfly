@@ -57,6 +57,13 @@ The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
 `STRATA_DS41_CUDA=ON` for the DeepSeek CUDA targets; this is separate from
 the normal Strata engine's backend settings.
 
+The engine's default `--slots auto` sizes uniform Q2_K/Q3_K expert caches
+against the free-VRAM budget, including slot alignment. With batched
+prefill, allocation is deferred until the prompt buffers are released.
+If the automatic budget has no room, decode uses the RAM/file tiers
+without a VRAM expert cache. An explicit `--slots N` remains a manual
+capacity choice; it must fit the available VRAM.
+
 ## Serve through the isolated adapter
 
 The adapter reuses Strata's HTTP server in a separate process with V4.1
@@ -181,3 +188,10 @@ quality, long-context, throughput or reference-logit benchmarks. Real-model
 tool calling, DSpark, fused ggml operations and multi-GPU were not validated.
 HIP, SYCL and Metal were not built because the add-on does not support them;
 their existing Strata sources were left unchanged.
+
+A subsequent cache-sizing correction passed focused CPU tests (2/2) and
+CUDA tests (4/4). Small uniform Q2_K/Q3_K fixtures cover bounded allocation
+(two slots rather than eight model experts), explicit slot counts,
+zero/sub-slot budgets, deferred allocation and release/reopen. Standard
+GGUF launcher fixtures also check automatic, explicit and no-room budgets
+through generation. These regressions do not establish a throughput gain.
