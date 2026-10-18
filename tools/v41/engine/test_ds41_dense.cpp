@@ -11,8 +11,10 @@
 #include "ggml-cpu.h"
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -97,7 +99,72 @@ std::vector<int> parse_ints(const std::string & s) {
 
 }  // namespace
 
+static int span_cache_test(const std::string & path) {
+    std::vector<uint8_t> reference;
+    for (int mode = 0; mode < 4; ++mode) {
+        setenv("STRATA_DS41_PREFILL_GRAPH_CACHE", mode & 1 ? "1" : "0", 1);
+        setenv("STRATA_DS41_PREFILL_ROW_CACHE", mode & 2 ? "1" : "0", 1);
+        Ds41DenseConfig cfg;
+        cfg.n_threads = 2;
+        cfg.ctx_max = 512;
+        cfg.max_pass = 3;
+        cfg.prompt_batch = 257;
+        Ds41Dense dn;
+        std::string err;
+        if (!dn.init(path, cfg, err)) { std::fprintf(stderr, "init: %s\n", err.c_str()); return 1; }
+        const int D = dn.geom().n_embd, V = dn.geom().vocab, NU = dn.geom().n_used;
+        std::vector<uint8_t> result;
+        auto append = [&](const void * p, size_t size) {
+            const auto * bytes = static_cast<const uint8_t *>(p);
+            result.insert(result.end(), bytes, bytes + size);
+        };
+        auto require = [&](bool ok) {
+            if (!ok) { std::fprintf(stderr, "span cache mode %d: %s\n", mode, dn.last_error().c_str()); std::exit(1); }
+        };
+        int pos = 0;
+        const auto start = std::chrono::steady_clock::now();
+        // Repeated shapes with changed ids/positions, odd tails, column reallocations, compressed-cap growth,
+        // and 65 spans (130 init/finish entries) to force the bounded graph cache to evict live shapes.
+        for (int B : { 7, 7, 8, 8, 1, 11, 193, 193, 7 }) {
+            require(dn.set_columns(B));
+            std::vector<int> tids(B);
+            for (int i = 0; i < B; ++i) tids[i] = (pos + i * 3) % V;
+            require(dn.begin_batch(tids.data(), B, pos));
+            std::vector<float> routed((size_t) B * D), logits((size_t) B * V);
+            for (int layer = 0; layer < dn.n_layer(); ++layer) {
+                for (int c = 0; c < B; c += cfg.max_pass)
+                    require(dn.attn_router_span(layer, c, std::min(cfg.max_pass, B - c)));
+                append(dn.batch_fn(), (size_t) B * D * sizeof(float));
+                append(dn.batch_ids(), (size_t) B * NU * sizeof(int32_t));
+                append(dn.batch_wts(), (size_t) B * NU * sizeof(float));
+                for (size_t i = 0; i < routed.size(); ++i)
+                    routed[i] = dn.batch_fn()[i] * .125f + .001f * (float) ((i + pos) % 7);
+                require(dn.upload_routed(routed.data(), B));
+                for (int c = 0; c < B; c += cfg.max_pass)
+                    require(dn.finish_span(layer, c, std::min(cfg.max_pass, B - c)));
+                std::vector<float> x, pre;
+                dn.read_state(x, pre);
+                append(x.data(), x.size() * sizeof(float));
+                append(pre.data(), pre.size() * sizeof(float));
+            }
+            require(dn.logits(0, B, logits.data()));
+            for (float value : logits) require(std::isfinite(value));
+            append(logits.data(), logits.size() * sizeof(float));
+            pos += B;
+        }
+        if (mode == 0) reference = std::move(result);
+        else if (result != reference) {
+            std::fprintf(stderr, "span cache mode %d: outputs differ from default OFF\n", mode);
+            return 1;
+        }
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        std::printf("span cache graph=%d rows=%d: bitwise exact, %.3f s\n", mode & 1, (mode >> 1) & 1, seconds);
+    }
+    return 0;
+}
+
 int main(int argc, char ** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--span-cache-test") return span_cache_test(argv[2]);
     if (argc < 2) { std::fprintf(stderr, "usage: see the file header\n"); return 2; }
     std::string path = argv[1], out = "/tmp/ds41", mode = "both";
     std::vector<int> toks;
