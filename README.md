@@ -1,9 +1,36 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
-  </picture>
-</p>
+<h1 align="center">🪶 Dragonfly</h1>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly at the Pareto frontier of inference performance"></p>
+
+## What is Dragonfly?
+
+**Dragonfly is DeepSeek V4.1 Flash 1017 at the Pareto frontier.**
+
+Dragonflies don't fly by brute force. They fly with four independently controlled wings, making constant micro-adjustments with minimal energy. Dragonfly applies the same principle to inference: specialize aggressively, control execution precisely, eliminate waste, extract maximum performance.
+
+### The design
+
+- **Specialized, not generic.** Every optimization targets DeepSeek V4.1 Flash 1017's exact architecture and execution patterns.
+- **Precise, not powerful.** Four independent control surfaces (execution, memory, scheduling, hardware) finely tuned instead of one blunt instrument.
+- **At the edge.** Trading flexibility for performance to reach the Pareto frontier—the point where you can't improve one metric without sacrificing another.
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **Optimized for** | DeepSeek V4.1 Flash 1017 only | Multiple models |
+| **Philosophy** | Specialized precision | General-purpose flexibility |
+| **Use case** | Maximum throughput/latency on one model | Broad hardware & model support |
+| **Fused quantization** | ✅ Yes | ❌ No |
+| **Expert residency tuning** | ✅ Calibrated & measured | ❌ No |
+| **Drop-in replacement** | ❌ No | ✅ Yes |
+
+**Use Strata if** you need multi-model support or broad hardware compatibility.
+**Use Dragonfly if** you want maximum performance on DeepSeek V4.1 Flash 1017.
+
+---
+
+# Strata
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
@@ -24,6 +51,11 @@
 Strata runs **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**, a 125-billion-parameter model that
 normally needs a server, on a normal PC. It chats, writes code, reads pictures and works with your apps and coding
 agents. Your chats and files stay on your PC.
+
+This fork also has an opt-in, experimental [DeepSeek V4.1 Flash 1017 add-on](tools/v41/README.md).
+Its separate CUDA engine and server default to all visible GPUs (`--expert-gpus auto`);
+supported multi-GPU settings and measured profiling results are in the add-on guide.
+It leaves the normal Strata installer and Qwen defaults unchanged.
 
 **New here?** Check [what you need](#what-you-need), then [install the app](#option-a-the-strata-app).
 

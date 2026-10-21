@@ -1,11 +1,39 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
-  </picture>
-</p>
+<h1 align="center">🪶 Dragonfly (Libellule)</h1>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <b>Français</b> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
+
+<p align="center"><b>Précision à la frontière de Pareto</b><br>
+Un fork de Strata aggressivement optimisé pour DeepSeek V4.1 Flash 1017 · Repousser les limites de la performance d'inférence</p>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly à la frontière de Pareto"></p>
+
+## Qu'est-ce que Dragonfly ?
+
+**Dragonfly est DeepSeek V4.1 Flash 1017 à la frontière de Pareto.**
+
+Les libellules ne volent pas par la force brute. Elles volent avec quatre paires d'ailes contrôlées indépendamment, effectuant des micro-ajustements constants avec une énergie minimale. Dragonfly applique le même principe à l'inférence : se spécialiser agressivement, contrôler l'exécution avec précision, éliminer les gaspillages, extraire une performance maximale.
+
+### Philosophie de conception
+
+- **Spécialisé, pas générique.** Chaque optimisation cible l'architecture exacte et les modèles d'exécution de DeepSeek V4.1 Flash 1017.
+- **Précis, pas puissant.** Quatre surfaces de contrôle indépendantes (exécution, mémoire, planification, matériel) finement réglées plutôt qu'un seul outil émoussé.
+- **À la limite.** Échanger la flexibilité contre la performance pour atteindre la frontière de Pareto – le point où vous ne pouvez pas améliorer une métrique sans en sacrifier une autre.
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **Optimisé pour** | DeepSeek V4.1 Flash 1017 uniquement | Plusieurs modèles |
+| **Philosophie de conception** | Précision spécialisée | Flexibilité générique |
+| **Cas d'usage** | Débit/latence maximums sur un modèle | Support large matériel & modèles |
+| **Quantification fusionnée** | ✅ Oui | ❌ Non |
+| **Réglage de résidence expert** | ✅ Calibré & mesuré | ❌ Non |
+| **Remplacement clé en main** | ❌ Non | ✅ Oui |
+
+**Utilisez Strata si** vous avez besoin de support multi-modèles ou de large compatibilité matérielle.
+**Utilisez Dragonfly si** vous voulez une performance maximale sur DeepSeek V4.1 Flash 1017.
+
+---
 
 <h3 align="center">Faites tourner un modèle de pointe sur votre propre PC de jeu</h3>
 
@@ -24,6 +52,9 @@
 Strata fait tourner **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**, un modèle de 125 milliards
 de paramètres qui demande normalement un serveur, sur un PC ordinaire. Il discute, écrit du code, lit des images et
 fonctionne avec vos applications et vos agents de code. Vos conversations et vos fichiers restent sur votre PC.
+
+Ce fork propose aussi une extension expérimentale pour **DeepSeek V4.1 Flash1017**, à activer explicitement, via une procédure distincte sous Linux pour CPU ou NVIDIA ; consultez le [guide en anglais](tools/v41/README.md). L'installateur Strata existant et les paramètres par défaut de Qwen restent inchangés.
+Le moteur CUDA séparé utilise toutes les GPU visibles par défaut (`--expert-gpus auto`) ; le guide présente la prise en charge multi-GPU et les résultats de profilage.
 
 **Nouveau ici ?** Regardez [ce qu'il vous faut](#ce-quil-vous-faut), puis [installez l'application](#option-a--lapplication-strata).
 

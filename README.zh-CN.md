@@ -1,11 +1,39 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
-  </picture>
-</p>
+<h1 align="center">🪶 Dragonfly（蜻蜓）</h1>
 
 <p align="center"><a href="README.md">English</a> · <b>简体中文</b> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
+
+<p align="center"><b>在帕累托前沿上实现精度</b><br>
+为 DeepSeek V4.1 Flash 1017 优化的 Strata fork · 推动推理性能的边界</p>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly 在帕累托前沿上飞行"></p>
+
+## Dragonfly 是什么？
+
+**Dragonfly 是 DeepSeek V4.1 Flash 1017 在帕累托前沿的实现。**
+
+蜻蜓不靠蛮力飞行。它们用四对独立可控的翅膀，进行不断的微调，消耗最少的能量。Dragonfly 对推理应用同样的原则：主动专化、精确控制执行、消除浪费、提取最大性能。
+
+### 设计理念
+
+- **专化而非通用。** 每一项优化都针对 DeepSeek V4.1 Flash 1017 的精确架构和执行特性。
+- **精确而非蛮力。** 四个独立控制面（执行、内存、调度、硬件）精细调优，而非一个钝工具。
+- **在前沿。** 用灵活性换性能，到达帕累托前沿——无法改进一个指标而不牺牲另一个的点。
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **优化对象** | 仅 DeepSeek V4.1 Flash 1017 | 多个模型 |
+| **设计理念** | 专化精度 | 通用灵活性 |
+| **用途** | 单模型最大吞吐量/延迟 | 广泛硬件和模型支持 |
+| **融合量化** | ✅ 是 | ❌ 否 |
+| **专家驻留调优** | ✅ 校准且测量 | ❌ 否 |
+| **即插即用** | ❌ 否 | ✅ 是 |
+
+**使用 Strata 如果** 你需要多模型支持或广泛的硬件兼容性。
+**使用 Dragonfly 如果** 你想要 DeepSeek V4.1 Flash 1017 上的最大性能。
+
+---
 
 <h3 align="center">在你自己的游戏电脑上运行最先进的模型</h3>
 
@@ -24,6 +52,9 @@
 Strata 运行 **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**。这是一个 1250 亿参数的模型，
 通常需要服务器才能跑，现在用普通电脑就行。它能聊天、写代码、看图片，也能配合你的应用和编程智能体使用。
 你的聊天记录和文件都留在你自己的电脑上。
+
+本分支还提供需显式启用的实验性 **DeepSeek V4.1 Flash1017** 附加组件，采用独立的 Linux CPU 或 NVIDIA 运行路径，详见[英文指南](tools/v41/README.md)。现有 Strata 安装程序和 Qwen 默认设置保持不变。
+独立的 CUDA 引擎默认使用所有可见 GPU（`--expert-gpus auto`）；多 GPU 支持范围和性能分析结果请参阅指南。
 
 **第一次用？** 先看[硬件要求](#硬件要求)，再[安装应用](#方式-astrata-应用)。
 
