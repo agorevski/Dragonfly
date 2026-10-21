@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(ds41_stock_cuda_backend LANGUAGES C CXX CUDA)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+if(NOT DS41_GGML_SOURCE)
+    message(FATAL_ERROR "DS41_GGML_SOURCE must name the selected stock ggml source")
+endif()
+add_subdirectory("${DS41_GGML_SOURCE}" ggml EXCLUDE_FROM_ALL)

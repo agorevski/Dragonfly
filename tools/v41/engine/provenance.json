@@ -1,0 +1,291 @@
+{
+  "source_repository": "https://github.com/Indras-Mirror/Xolotl",
+  "source_commit": "6e4bc8e5c09cf732dfa25ccf3ecfc81e672e6d69",
+  "source_tracked_diff_sha256": "907e44a67e457765458213595bf3a00ed6b7d9fd03b332a095cd728a1413c53a",
+  "import_note": "Imported from the read-only working tree, including uncommitted standard-1017 geometry/dense/Engram/MoE/generate correctness changes. Source SHA256 values identify imported bytes before port adjustments.",
+  "ggml_commit": "3cf03257f219afbe7334045ff7c6a06ac68c627d",
+  "ggml_archive_sha256": "c076d7534afa0e5d0ec2a0d425b11e791c16f3de0d727221aea071cef156a280",
+  "port_adjustments": [
+    "All fork headers, CPU pool/native/PTQ kernels, CUDA IQ/MMVQ fork helpers and elastic cache remain private; do not link their same-named but different-ABI symbols with upstream Strata engine libraries.",
+    "Compile unchanged upstream CPU IQ and platform helpers again with private headers; finite-clamp IQ gate/up uses stock ggml dot products instead of requiring modified upstream IQ kernel APIs.",
+    "Build stock ggml CUDA in a separate project sharing the exact selected ggml sources, link only its backend archive and initialize it directly; no global ggml target or registry patches.",
+    "Keep PDL graph launches disabled, fused DS41 patches absent, MMQ unsupported with explicit CLI error, DSpark optional OFF, and uncommitted multi-GPU wrapper/flags excluded coherently.",
+    "Fix optional-DSpark-off compilation and reject disabled speculative environment switches before loading a model.",
+    "Add self-contained standard GGUF and full-width mixed-pool fixtures; extend CUDA reference parity to standard Q2_K with finite SwiGLU clamp."
+  ],
+  "imported_files": {
+    "tools/v41/engine/ds41_dense.cpp": {
+      "source": "tools/v41/engine/ds41_dense.cpp",
+      "source_sha256": "6146cd0de7a606eebc09ad74bcc9819d9963bf64bf0b216107369ffd166ed896"
+    },
+    "tools/v41/engine/ds41_dense.hpp": {
+      "source": "tools/v41/engine/ds41_dense.hpp",
+      "source_sha256": "e8062cbf923bb8ff905c26d494d3f60482f67484a967840f25f56bd9715435f8"
+    },
+    "tools/v41/engine/ds41_dspark.cpp": {
+      "source": "tools/v41/engine/ds41_dspark.cpp",
+      "source_sha256": "ca8c40b77884c3ff798a70a6d3a56ed1d048ee72b29d40f5ca1b8435b90881a9"
+    },
+    "tools/v41/engine/ds41_dspark.hpp": {
+      "source": "tools/v41/engine/ds41_dspark.hpp",
+      "source_sha256": "f88d8a66fb0708efb7372ef26041438bc76a7b464df5b62c453a4ce55187f619"
+    },
+    "tools/v41/engine/ds41_engram.cpp": {
+      "source": "tools/v41/engine/ds41_engram.cpp",
+      "source_sha256": "5fbd598d976b0dddb9cc9bb2e4dbfb70a080752070428fab27fa6ce68cfbad23"
+    },
+    "tools/v41/engine/ds41_engram.hpp": {
+      "source": "tools/v41/engine/ds41_engram.hpp",
+      "source_sha256": "69a645e4640852476606acf19bead2c790f85b9d45604086f411ccf21eb24470"
+    },
+    "tools/v41/engine/ds41_generate.cpp": {
+      "source": "tools/v41/engine/ds41_generate.cpp",
+      "source_sha256": "4bb83df86cf1b6fada30ce90f9d1a18843cc48f2e3b7bad0e6b1f75556725cd8"
+    },
+    "tools/v41/engine/ds41_geometry.hpp": {
+      "source": "tools/v41/engine/ds41_geometry.hpp",
+      "source_sha256": "6e701fd5e4ece8233a9e9eb2deb883b09f9052458c06c325f7b50b59251d637d"
+    },
+    "tools/v41/engine/ds41_moe.cpp": {
+      "source": "tools/v41/engine/ds41_moe.cpp",
+      "source_sha256": "183e79e48322bd27e3d2863d84da9bbff68400cf26c44e3c895bbed889f811e1"
+    },
+    "tools/v41/engine/ds41_moe.hpp": {
+      "source": "tools/v41/engine/ds41_moe.hpp",
+      "source_sha256": "702fe64babcb7d26f0420951d2b0c9e174b072f5ba00cd600ebd60d533706dc1"
+    },
+    "tools/v41/engine/ds41_ops.hpp": {
+      "source": "tools/v41/engine/ds41_ops.hpp",
+      "source_sha256": "84866ec2f84a6bb633775525d5af752eac0e33f1431859f2965d0d7adb92653e"
+    },
+    "tools/v41/engine/ds41_transcode.cu": {
+      "source": "tools/v41/engine/ds41_transcode.cu",
+      "source_sha256": "ba7e3c9bc1b21a3778b0566aafd773c0eb3c24046c8e772c64a1ca40101a5068"
+    },
+    "tools/v41/engine/ds41_transcode.hpp": {
+      "source": "tools/v41/engine/ds41_transcode.hpp",
+      "source_sha256": "0e5f17d606ef495d2f28af8ac2295f6ed3de732eb8b2e197d8cf6c1d26c020e2"
+    },
+    "tools/v41/engine/test_ds41_dense.cpp": {
+      "source": "tools/v41/engine/test_ds41_dense.cpp",
+      "source_sha256": "35c07301d847abe5727a70cd9864f02799e062a87ac3df8b2d25fd7232e98026"
+    },
+    "tools/v41/engine/test_ds41_dspark.cpp": {
+      "source": "tools/v41/engine/test_ds41_dspark.cpp",
+      "source_sha256": "ad723717c4edb21474c139eed5fb4fdecde5ce0aeb70c2bf76027b51709711dc"
+    },
+    "tools/v41/engine/test_ds41_engram_quantized.cpp": {
+      "source": "tools/v41/engine/test_ds41_engram_quantized.cpp",
+      "source_sha256": "de454f07428533ad9d8d7f46d2f4bde94776d6fb2317cb97b98fca85b978cf1e"
+    },
+    "tools/v41/engine/test_ds41_geometry.cpp": {
+      "source": "tools/v41/engine/test_ds41_geometry.cpp",
+      "source_sha256": "013ab4743f71b8120f7a38acaba66f01a8a511132d747e35190ee61634a85227"
+    },
+    "tools/v41/engine/test_ds41_moe.cpp": {
+      "source": "tools/v41/engine/test_ds41_moe.cpp",
+      "source_sha256": "c08e3684d59c5d88648a0300161a00c33f5fbbd7ce1d832733a089b2bd24938b"
+    },
+    "tools/v41/engine/test_ds41_ops.cpp": {
+      "source": "tools/v41/engine/test_ds41_ops.cpp",
+      "source_sha256": "29aff573da0a235abe5dfb35705212517d3600925846e20339f96e08ce408801"
+    },
+    "tools/v41/engine/test_ds41_prom.cpp": {
+      "source": "tools/v41/engine/test_ds41_prom.cpp",
+      "source_sha256": "493426050e2f2abbfed203dc002b702309ff39b0e240d61f88abbca8b6f1df26"
+    },
+    "tools/v41/engine/test_ds41_ptq1.cpp": {
+      "source": "tests/cpu/ptq1_0_test.cpp",
+      "source_sha256": "f1c1d0fb9403dc2e9336df3df40784be69a82b347e187d429f7a2c53d55b173f"
+    },
+    "tools/v41/engine/test_ds41_ptq1_cuda.cpp": {
+      "source": "tests/cuda/ptq1_0_cuda_test.cpp",
+      "source_sha256": "565db34fb6a3cf0bf66c9648bea52f1d5bd16c20582833457839ce13692d832f"
+    },
+    "tools/v41/engine/test_ds41_transcode.cpp": {
+      "source": "tools/v41/engine/test_ds41_transcode.cpp",
+      "source_sha256": "4335d0d440710a15387e2c4a6237424dc7d9a6cd118563126935ab4172cd6a94"
+    },
+    "tools/v41/engine/v41_engine.cmake": {
+      "source": "tools/v41/engine/v41_engine.cmake",
+      "source_sha256": "f2a6dd73331ce9542c546637e0d1958ad777287371e616f488472f133199c63e"
+    },
+    "tools/v41/compat/core/expert_cache.cpp": {
+      "source": "src/core/expert_cache.cpp",
+      "source_sha256": "cabf0a743e8c366022cc9c435034ef55448d71c6fd4952172525cc6bbde551fb"
+    },
+    "tools/v41/compat/cpu/native_expert.cpp": {
+      "source": "src/kernels/cpu/native_expert.cpp",
+      "source_sha256": "5a0afaa33844d056ecd339c780ca648a3f812325521395a2e3af54c2934749e3"
+    },
+    "tools/v41/compat/cpu/pool.cpp": {
+      "source": "src/kernels/cpu/pool.cpp",
+      "source_sha256": "ac5cb4424834c903c28a1aa382c9d2d844a4690c420ae0ba8285a55c24ee2433"
+    },
+    "tools/v41/compat/cpu/ptq1_0.cpp": {
+      "source": "src/kernels/cpu/ptq1_0.cpp",
+      "source_sha256": "f5e520a06905de5fe5e6bc03071327e6a4d50cd72a4ad7271bbc2f11966c8fbd"
+    },
+    "tools/v41/compat/cuda/fork/fork_dq.cuh": {
+      "source": "src/kernels/cuda/fork/fork_dq.cuh",
+      "source_sha256": "c945e02d6e23507aa4bf577206fbfb661eb3cf6d66207e365f20448b785eff38"
+    },
+    "tools/v41/compat/cuda/fork/fork_fmt.cuh": {
+      "source": "src/kernels/cuda/fork/fork_fmt.cuh",
+      "source_sha256": "865619e689cd77706c0e35f039d0a734d16e65c93ce20d7c0e84e00c31c4e72e"
+    },
+    "tools/v41/compat/cuda/fork/fork_gu_mixed.cuh": {
+      "source": "src/kernels/cuda/fork/fork_gu_mixed.cuh",
+      "source_sha256": "feed6520da44ca008bbebd86fcea774e84bafb0acefabfa6bee3b7d2cad74c4e"
+    },
+    "tools/v41/compat/cuda/fork/fork_helpers.cuh": {
+      "source": "src/kernels/cuda/fork/fork_helpers.cuh",
+      "source_sha256": "dbd014ca0c05fb4740c6a332a4ef8e5f7fe74eb067d7cd8a7b7d51455a188c20"
+    },
+    "tools/v41/compat/cuda/fork/fork_layout.cuh": {
+      "source": "src/kernels/cuda/fork/fork_layout.cuh",
+      "source_sha256": "62e42b940274e213922b45d2e3a6759cdb694cb7f9d2e38538e066835e2a3608"
+    },
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_block.cuh": {
+      "source": "src/kernels/cuda/fork/fork_mmvq_q2k_block.cuh",
+      "source_sha256": "ba7e23c8095b534212a9d680f710d933173bef51f1e1326a043898dc3f4742d9"
+    },
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_dot.cuh": {
+      "source": "src/kernels/cuda/fork/fork_mmvq_q2k_dot.cuh",
+      "source_sha256": "bca1861fd07898dbada9f31ebcb5121053410cc8b27fbbf8f2f76fc327191346"
+    },
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_launch.cuh": {
+      "source": "src/kernels/cuda/fork/fork_mmvq_q2k_launch.cuh",
+      "source_sha256": "9255a5c5319c09db9172985fda4083f372f218e48bcee93529b829ba3715524d"
+    },
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_traits.cuh": {
+      "source": "src/kernels/cuda/fork/fork_mmvq_q2k_traits.cuh",
+      "source_sha256": "6ec7dd610abbb7696deb18956e494c4ea78489d9f257f8aeb1ee8a864d091a4e"
+    },
+    "tools/v41/compat/cuda/fork/fork_prom.cuh": {
+      "source": "src/kernels/cuda/fork/fork_prom.cuh",
+      "source_sha256": "65177c7c72fd3ce606afc772586d44db77e73fe364883dd064e17692c51a1de4"
+    },
+    "tools/v41/compat/cuda/fork/fork_vecdot.cuh": {
+      "source": "src/kernels/cuda/fork/fork_vecdot.cuh",
+      "source_sha256": "f6f264748fca0d999cc9de82477ea46ca53b923d4f5bdaab80a069f0334c7abd"
+    },
+    "tools/v41/compat/cuda/fork/fork_weighted_sum.cuh": {
+      "source": "src/kernels/cuda/fork/fork_weighted_sum.cuh",
+      "source_sha256": "a0f0ceb94c8b771a99fb06832e6a778d8ecf9690ba654885b57eaed2b623f588"
+    },
+    "tools/v41/compat/cuda/iq_kernels.cu": {
+      "source": "src/kernels/cuda/iq_kernels.cu",
+      "source_sha256": "591a0929910420c2861338949f4a2bc766930d8d76ed44a9615a332f8a04a70f"
+    },
+    "tools/v41/compat/cuda/native_mmvq.cu": {
+      "source": "src/kernels/cuda/native_mmvq.cu",
+      "source_sha256": "16cf853eb4743b7f5c80d092beb9c06721ecff25a7975813921863d1635a82dd"
+    },
+    "tools/v41/compat/include/strata/artifact/ds4_geometry.hpp": {
+      "source": "include/strata/artifact/ds4_geometry.hpp",
+      "source_sha256": "514ff628de76c11a6c36b85e17bf4671cc1fb47101fcd1289bd903c4df5af36d"
+    },
+    "tools/v41/compat/include/strata/artifact/ds4_guard.hpp": {
+      "source": "include/strata/artifact/ds4_guard.hpp",
+      "source_sha256": "482febe53d606f7537410e453bee1dccb313493eec212cf1b5556d2dddc07d5c"
+    },
+    "tools/v41/compat/include/strata/artifact/gguf_reader.hpp": {
+      "source": "include/strata/artifact/gguf_reader.hpp",
+      "source_sha256": "5d9e53f285c2597a2fec0b49174425080ef43c23608c0eb8f0c793543926aa80"
+    },
+    "tools/v41/compat/include/strata/core/expert_cache.hpp": {
+      "source": "include/strata/core/expert_cache.hpp",
+      "source_sha256": "898a1bc037e2150406e3ec0b9852c68fbc033e1abce54d88ae8dabf3317a3f0b"
+    },
+    "tools/v41/compat/include/strata/kernels/cpu/native_expert.hpp": {
+      "source": "include/strata/kernels/cpu/native_expert.hpp",
+      "source_sha256": "51c2d25f18d13979b3bb0525fd842f99bcbb7f20d03f2e36d74d7c0df41a1e07"
+    },
+    "tools/v41/compat/include/strata/kernels/cpu/pool.hpp": {
+      "source": "include/strata/kernels/cpu/pool.hpp",
+      "source_sha256": "ea3aed687a04f929226e0f70c273902f43a564d9a256774979f10599bb92fe36"
+    },
+    "tools/v41/compat/include/strata/kernels/cpu/ptq1_0.hpp": {
+      "source": "include/strata/kernels/cpu/ptq1_0.hpp",
+      "source_sha256": "04e8d599ccd817ad31559e143fc7cb92f3715aa3f13f76fb646148a917b260bb"
+    },
+    "tools/v41/compat/include/strata/kernels/iq_kernels.hpp": {
+      "source": "include/strata/kernels/iq_kernels.hpp",
+      "source_sha256": "f8003aae263a258337608a20231f6195cefe77c274cc86872f7e62b0d4130406"
+    },
+    "tools/v41/compat/include/strata/kernels/native_mmvq.hpp": {
+      "source": "include/strata/kernels/native_mmvq.hpp",
+      "source_sha256": "a08f87f4bbf2b3dbaf98f29c4e36b6b8f484c6b471e746b17e5b5733e7101cc8"
+    }
+  },
+  "engine_build_file_manifest": [
+    "CMakeLists.txt",
+    "tools/v41/CMakeLists.txt",
+    "tools/v41/cmake/cuda-backend/CMakeLists.txt",
+    "tools/v41/compat/core/expert_cache.cpp",
+    "tools/v41/compat/cpu/native_expert.cpp",
+    "tools/v41/compat/cpu/pool.cpp",
+    "tools/v41/compat/cpu/ptq1_0.cpp",
+    "tools/v41/compat/cuda/fork/fork_dq.cuh",
+    "tools/v41/compat/cuda/fork/fork_fmt.cuh",
+    "tools/v41/compat/cuda/fork/fork_gu_mixed.cuh",
+    "tools/v41/compat/cuda/fork/fork_helpers.cuh",
+    "tools/v41/compat/cuda/fork/fork_layout.cuh",
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_block.cuh",
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_dot.cuh",
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_launch.cuh",
+    "tools/v41/compat/cuda/fork/fork_mmvq_q2k_traits.cuh",
+    "tools/v41/compat/cuda/fork/fork_prom.cuh",
+    "tools/v41/compat/cuda/fork/fork_vecdot.cuh",
+    "tools/v41/compat/cuda/fork/fork_weighted_sum.cuh",
+    "tools/v41/compat/cuda/iq_kernels.cu",
+    "tools/v41/compat/cuda/native_mmvq.cu",
+    "tools/v41/compat/cuda/pdl.cpp",
+    "tools/v41/compat/include/strata/artifact/ds4_geometry.hpp",
+    "tools/v41/compat/include/strata/artifact/ds4_guard.hpp",
+    "tools/v41/compat/include/strata/artifact/gguf_reader.hpp",
+    "tools/v41/compat/include/strata/core/expert_cache.hpp",
+    "tools/v41/compat/include/strata/kernels/cpu/native_expert.hpp",
+    "tools/v41/compat/include/strata/kernels/cpu/pool.hpp",
+    "tools/v41/compat/include/strata/kernels/cpu/ptq1_0.hpp",
+    "tools/v41/compat/include/strata/kernels/iq_kernels.hpp",
+    "tools/v41/compat/include/strata/kernels/native_mmvq.hpp",
+    "tools/v41/engine/ds41_dense.cpp",
+    "tools/v41/engine/ds41_dense.hpp",
+    "tools/v41/engine/ds41_dspark.cpp",
+    "tools/v41/engine/ds41_dspark.hpp",
+    "tools/v41/engine/ds41_engram.cpp",
+    "tools/v41/engine/ds41_engram.hpp",
+    "tools/v41/engine/ds41_generate.cpp",
+    "tools/v41/engine/ds41_geometry.hpp",
+    "tools/v41/engine/ds41_moe.cpp",
+    "tools/v41/engine/ds41_moe.hpp",
+    "tools/v41/engine/ds41_ops.hpp",
+    "tools/v41/engine/ds41_transcode.cu",
+    "tools/v41/engine/ds41_transcode.hpp",
+    "tools/v41/engine/provenance.json",
+    "tools/v41/engine/test_ds41_dense.cpp",
+    "tools/v41/engine/test_ds41_dspark.cpp",
+    "tools/v41/engine/test_ds41_engram_quantized.cpp",
+    "tools/v41/engine/test_ds41_geometry.cpp",
+    "tools/v41/engine/test_ds41_moe.cpp",
+    "tools/v41/engine/test_ds41_ops.cpp",
+    "tools/v41/engine/test_ds41_pool.cpp",
+    "tools/v41/engine/test_ds41_prom.cpp",
+    "tools/v41/engine/test_ds41_ptq1.cpp",
+    "tools/v41/engine/test_ds41_ptq1_cuda.cpp",
+    "tools/v41/engine/test_ds41_standard.py",
+    "tools/v41/engine/test_ds41_transcode.cpp",
+    "tools/v41/engine/v41_engine.cmake"
+  ],
+  "new_or_replaced_build_test_files": [
+    "CMakeLists.txt",
+    "tools/v41/CMakeLists.txt",
+    "tools/v41/cmake/cuda-backend/CMakeLists.txt",
+    "tools/v41/compat/cuda/pdl.cpp",
+    "tools/v41/engine/provenance.json",
+    "tools/v41/engine/test_ds41_pool.cpp",
+    "tools/v41/engine/test_ds41_standard.py"
+  ]
+}
