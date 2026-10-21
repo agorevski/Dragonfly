@@ -755,3 +755,190 @@ The added four-warp mixed CUDA cases passed 2/2. The merged
 fallbacks with exact output floats and hidden q8 storage; the production
 Q2/Q2/Q3 FP64 oracle relative-L2 was about `8.3e-8`. Benchmark Python
 tests passed 7/7. No HIP/SYCL backend or upstream Strata/Qwen source changed.
+
+## Further prefill investigation, 2026-10-20
+
+These runs used the same four Quadro RTX 8000 cards, SM75/CUDA 13.4,
+Xeon W-2295 host and local ten-shard Q2_K checkpoint. The starting source
+was `ccfc1917361ea50eaed46beb4eb371cd6cd4e62f` plus the three existing
+CPU-expert/build edits, preserved in the baseline provenance. No weights
+were downloaded. All GPU fixtures, profiling and checkpoint runs were
+serialized by one worker, with advisory leases for all four GPUs and model
+RAM, occupied-GPU checks and a 40 GiB MemAvailable floor. The host was not
+isolated from other users.
+
+Both initial controls used 512 input IDs, 96 output tokens, context 4096,
+eight threads, automatic slots, a 96 GiB arena cap, 2 GiB VRAM margin,
+exact routing and no prefix reuse. Each process completed three requests.
+Warm numbers are medians of the two requests after process-cold request 0;
+they are not cold-disk measurements.
+
+| Same-day starting control | Warm prefill tok/s | Warm decode tok/s | Warm TTFT s |
+| --- | ---: | ---: | ---: |
+| Batch 32 / chunk 16, existing short-turn cutoff | 65.590 | 21.424 | 7.809 |
+| Best existing controls from the preceding section | 114.928 | 23.060 | 4.456 |
+
+The best-existing control uses batch 128 / chunk 64, step cutoff 0,
+chunk-batch, fused/paired gate-up, eight columns, four-warp batch down,
+grouped gate-up/down modes 2 and disabled dense CUDA graphs. Improvements
+must be compared with this control, not just with the slower first row.
+
+An initial same-binary screen tested two new candidates: integer-exact
+Q2_K subscale folding before paired DP4A, and skipping index scoring when
+top-k necessarily selects every compressed row. The latter preserves
+candidate-source scores, visibility masks and persistent index writes.
+
+| Change from best-existing controls | Warm prefill tok/s | Warm decode tok/s |
+| --- | ---: | ---: |
+| Control | 113.954 | 22.822 |
+| Q2_K prescale only | 114.521 | 22.435 |
+| All-row index shortcut only | 115.442 | 22.635 |
+| Both | 116.118 | 22.863 |
+| Return to control | 113.625 | 22.841 |
+
+The combined screening difference is only about 2%, not a substantial
+improvement. Two warm requests per process do not establish the smaller
+individual gains. All 21 unprofiled requests across the initial controls
+and this screen produced the same 96 IDs, with zero file routes.
+Both candidates were removed from the implementation; their source,
+executables and measurements remain in the session artifacts.
+
+A separate warm Nsight capture found 1,472.3 ms in batch down and
+1,411.3 ms in fused gate/up: together 76.0% of the 3,794.8 ms summed
+kernel time. Each kernel launched 392 times. In 228 launches of each,
+only two expert groups were present, yet the grid still had 16 column
+tiles. The caller passed the whole 128-token batch as the group-length
+bound. This identifies avoidable launch coverage, not a measured speedup.
+Kernel, copy and host API sums overlap and must not be added as wall-time
+components. The instrumented request-to-first-token window was 4.666 s;
+throughput comparisons above use unprofiled runs.
+
+### Per-launch maximum bound: screened, not retained
+
+The next experimental binary, SHA256
+`22f2c9f9ed3f49936e190b137be305d5d65304d4a0c72f2d8b79782a77fd06e8`,
+replaced the whole-batch bound with the largest actual group length in
+each resident or streamed subset. It did not compact shorter groups
+within that subset. The same 512-input / 96-output comparison measured:
+
+| Simple bound screen | Warm prefill tok/s | Warm decode tok/s | Warm TTFT s |
+| --- | ---: | ---: | ---: |
+| OFF | 115.179 | 22.464 | 4.447 |
+| ON | 116.584 | 23.079 | 4.393 |
+| OFF return | 114.915 | 23.062 | 4.457 |
+
+The 1.22-1.45% difference is marginal, with overlapping warm ranges; it is
+not substantial acceleration. All nine requests generated the same 96 IDs,
+with zero file routes and at least 223.98 GiB MemAvailable. No 2048-token
+confirmation was run for this marginal candidate.
+
+The initial matrix's hash guard stopped before its returning control when
+the unused prescale/all-row harness flags were removed. The returning
+control was then explicitly recorded under the new harness hash, using
+the same binary, input, command and effective OFF environment. Both
+hashes and the guard stop are retained in `tight-grid512-combined-summary.json`.
+These are not silently treated as one unchanged harness version.
+
+The strict caller fixture first failed in OFF mode because a positive
+arena budget repopulated an all-resident fixture's empty filtered rank.
+The fixture was corrected to use zero arena only for all-resident cases;
+the exact coverage assertions were kept. Explicitly disabling its lazy
+prestaging also made the intended 32 MiB streaming halves effective.
+Version 2 passed columns 4/8, OFF/ON, with bitwise grouped-reference and
+cross-process output checks across resident, pinned, mixed and changed
+requests. The original failure and both fixture versions remain archived.
+
+### Compact active expert tiles
+
+The replacement keeps the existing opt-in
+`STRATA_DS41_BATCH_TIGHT_GRID=1` / harness `--batch-tight-grid`, but
+splits each expert's entries into native four- or eight-column subgroups.
+Repeated weight pointers and unchanged absolute entry indices give each
+active tile one group and one z slice. A ubiquitous expert no longer
+forces empty column tiles for every shorter expert. Entries, routing,
+quantization and weighted reduction order remain unchanged; no CUDA
+arithmetic file changed.
+
+Pointer/start capacity grows only for supported opt-in batch execution,
+before launches, and is reset with the workspace. OFF and unsupported
+layouts retain their original allocations and metadata. Overflow is
+reported before reading oversized input; exceeding the grid's group limit
+reports an explicit fallback to unsplit groups.
+
+The final executable SHA256 is
+`c07f7835965ba8abd83811e14184dc9c4d882452bd8c3b550f824ff4cf7c3716`.
+The persistent `build-ds41-sys/ds41_generate` matches the immutable archive.
+The protected three-file user patch still has SHA256
+`31def18e6bef5c95b5707a2edeb9746c8c451f2ea0c7f069099ade87fddc5674`,
+identical to the pre-task baseline.
+
+The final comparison kept all best-existing controls above and changed
+only `--batch-tight-grid`. Both workloads used that same executable and
+the frozen benchmark harness, SHA256
+`248274cd0dd461cf659feadf047f3f51fc0169c565e586100ccb8c19431e63b4`.
+Each case completed one process-cold and two warm requests, with 96 output
+tokens and no prefix reuse. The 2048-token input was an independently
+worded prompt, not an extension of the 512-token input. Its confirmation
+ran after an overnight gap and fresh GPU, RAM and lease checks.
+
+| Input tokens | Compact tiles | Warm prefill tok/s | Warm decode tok/s | Warm TTFT s |
+| ---: | --- | ---: | ---: | ---: |
+| 512 | OFF | 115.736 | 23.184 | 4.425 |
+| 512 | ON | 121.781 | 23.102 | 4.206 |
+| 512 | OFF return | 114.829 | 22.916 | 4.460 |
+| 2048 | OFF | 107.006 | 22.276 | 19.141 |
+| 2048 | ON | 112.565 | 21.994 | 18.197 |
+
+This is a **5.22% prefill improvement** against the initial tuned 512-token
+control, or 6.05% against its returning control. The independent 2048-token
+comparison improved by **5.19%**. These are modest local gains, not
+substantial acceleration. Decode did not improve. Most of the difference
+from the initial conservative 65.590 tok/s configuration comes from
+existing controls, not this patch.
+
+All 15 requests generated exactly the same 96 output IDs as their
+workload's OFF reference, with zero file routes. Minimum sampled
+MemAvailable was 225.29 GiB. Warm medians use only two requests per case;
+the 2048-token confirmation has no returning OFF control. No longer
+context or concurrent-serving result is implied.
+
+Passed checks on this final source:
+
+- `TMPDIR=$PWD/build-ds41-sys/compact-grid-scratch cmake --build build-ds41-sys --target ds41_generate test_ds41_batch ds41_moe_cpu --parallel 2`:
+  CUDA engine, fixture and CPU-tier build passed.
+- `cmake --build build-ds41/cpu --parallel 2` and
+  `ctest --test-dir build-ds41/cpu --output-on-failure`: CPU-only build
+  passed; 10/10 tests passed.
+- `python -m unittest discover -s tools/v41/bench -p 'test_*.py' -v`:
+  7/7 passed, including explicit enable/disable, stale-environment removal
+  and the chunk-batch prerequisite for the new control.
+- `python -m py_compile tools/v41/bench/benchmark.py tools/v41/bench/test_benchmark.py`
+  and `git diff --check`: passed.
+
+Four serial SM75 invocations of the final `test_ds41_batch --tight-grid`
+passed: columns 4/8, OFF/ON. Their exact argv and environment are in
+`compact-fixtures/summary.json`, with fixture SHA256
+`986da14c89fa468f4300a94e13a11dbcc8d764d19970edc63c682b4c50a03d6b`.
+All six resident/pinned/mixed scenarios per process matched grouped
+execution bitwise and had identical OFF/ON digests. They cover balanced
+and ubiquitous experts, 9-to-129-token capacity growth and shrink-back,
+changed inputs/routes/weights, unused experts and mixed formats. The ON
+overflow case returned an explicit error without changing output, tier
+state or statistics. All strict residency and pinned-tail assertions remain.
+
+One separate CPU-span setup attempt stopped before engine execution
+because its work directory already existed; it is not counted as a passed
+engine test. The CPU-only CTest results above are the completed regression
+run. Other GPU architectures, long contexts, concurrent serving and broad
+model-quality comparisons are not established by these checks.
+
+Raw evidence is in session
+`f8bf127e-12d3-4278-a4e1-e308a736793d/files/prefill-20261020/`:
+`baseline-summary.json`, `candidate-screen/`, immutable executables and
+source patches, exact commands, reservation records, token provenance,
+`compact512/summary.json`, `compact2048/summary.json`,
+`compact-final-summary.json`, `compact-final-commands.json`,
+and `profile/retry-registered/`. GPU/model processes exited and all leases
+were released after the final confirmation; owned scratch was archived
+without flushing shared caches. The first NVTX capture emitted no profile;
+its failed validation and export log remain alongside the successful retry.

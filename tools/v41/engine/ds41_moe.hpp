@@ -308,6 +308,7 @@ struct Ds41MoeConfig {
     bool chunk_mmq = false;
     /// Opt-in four-column native DP4A tiles for 5120/2304 Q2_K/Q3_K gate/up + Q3_K down.
     /// Other expert formats retain the grouped CUDA path. No fork MMQ ABI is needed.
+    /// STRATA_DS41_BATCH_TIGHT_GRID=1 splits expert groups into native-column tiles, preserving entry order and math.
     bool chunk_batch = false;
     bool persistent_cache = false; ///< layer-sharded runner: compact prompt buffers, resident expert MMQ
     /// Prompt chunks: while layer l's experts compute (and the caller runs layer l+1's dense half), DMA layer l+1's

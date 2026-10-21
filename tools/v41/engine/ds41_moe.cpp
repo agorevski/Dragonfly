@@ -358,6 +358,7 @@ struct Gpu {
     /// experts go through two device halves of `c_half` bytes (copy stream `s_cp` fills one while `s` computes
     /// the other); file-tier blobs are read into the matching pinned bounce half first.
     int64_t c_tok = 0, c_half = 0;
+    int64_t c_groups = 0;         ///< pointer/start capacity; compact batch tiles can outnumber distinct experts
     int64_t c_bhalf = 0;          ///< bytes of one pinned bounce half (file-tier reads); c_half may be larger (prestage)
     /// The cudaMallocHost'd landing pads (c_hparts, c_bounce) cost 3.4 s of cudaMallocHost per prompt (nsys) and are
     /// kept across prompts: `c_pin_tok` is the token capacity they hold, and release_chunk leaves them alone.  The
@@ -3832,10 +3833,30 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
     std::vector<std::pair<cudaEvent_t, cudaEvent_t>> tcev;  // prof: one pair per MMQ sub-run's PTQ1_0 transcode (inside kev)
     bool in_resident = true;
     std::vector<char> kev_res;
-    const int64_t H = im.g.n_embd, K = im.g.top_k, NE = (int64_t) n * K;
+    static const bool tight_grid = [] {
+        const char* v = std::getenv("STRATA_DS41_BATCH_TIGHT_GRID");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    static const int batch_cols = [] {
+        const char* v = std::getenv("STRATA_DS41_BATCH_COLS");
+        return v && v[0] == '8' && v[1] == '\0' ? 8 : 4;
+    }();
+    const int64_t H = im.g.n_embd, K = im.g.top_k;
     const int64_t CI = cf >= 0 ? cf : layer;          // the format class this pass computes
     const int64_t BL = im.bl[(size_t) CI];
     const strata::kernels::NativeExpertLayout& GL = gp.gll[(size_t) CI];
+    const bool compact_grid = tight_grid && im.cfg.chunk_batch && strata::kernels::native_expert_batch_supported(GL);
+    if (compact_grid && (n < 1 || K < 1 || K > INT32_MAX / (int64_t) n || im.g.n_experts > INT32_MAX)) {
+        std::fprintf(stderr, "ds41_moe: compact batch entries exceed 32-bit metadata bounds\n");
+        return false;
+    }
+    const int64_t NE = (int64_t) n * K;
+    const int64_t group_capacity = compact_grid ? std::max(im.g.n_experts, NE) : im.g.n_experts;
+    if (compact_grid && ((uint64_t) group_capacity > SIZE_MAX / sizeof(unsigned long long) ||
+                         (uint64_t) group_capacity >= SIZE_MAX / sizeof(int32_t))) {
+        std::fprintf(stderr, "ds41_moe: compact batch metadata allocation size overflow\n");
+        return false;
+    }
     auto in_pass = [&](int64_t j) { return cf < 0 || im.g.cls(layer, ids[j]) == cf; };
     const double t0 = now_ms();
     Ds41MoeStats st;
@@ -3858,6 +3879,14 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
         gp.c_hparts = nullptr;
         gp.c_pin_tok = n;
         ck(cudaMallocHost((void**) &gp.c_hparts, (size_t) n * (size_t) H * 4), "c_hparts");   // the summed rows
+    }
+    if (compact_grid && gp.c_ready && group_capacity > gp.c_groups) {
+        ck(cudaFree(gp.c_ptr), "c_ptr free");
+        ck(cudaFree(gp.c_start), "c_start free");
+        gp.c_ptr = gp.c_start = nullptr;
+        ck(cudaMalloc(&gp.c_ptr, sizeof(unsigned long long) * (size_t) group_capacity), "c_ptr");
+        ck(cudaMalloc(&gp.c_start, sizeof(int32_t) * ((size_t) group_capacity + 1)), "c_start");
+        gp.c_groups = group_capacity;
     }
     if (!gp.c_ready) {
         const char* mib = std::getenv("MIMO_CHUNK_STAGE_MIB");
@@ -3888,9 +3917,10 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
         // prestage: one device half holds a whole layer (every expert at the MMQ stride, <= blob + 1 MiB each)
         if (im.cfg.chunk_prestage)
             gp.c_half = std::max<int64_t>(gp.c_half, im.g.n_experts * (im.blob + 1048576));
-        const int64_t ng = im.g.n_experts;
+        const int64_t ng = group_capacity;
         ck(cudaMalloc(&gp.c_ptr, sizeof(unsigned long long) * (size_t) ng), "c_ptr");
         ck(cudaMalloc(&gp.c_start, sizeof(int32_t) * (size_t) (ng + 1)), "c_start");
+        gp.c_groups = ng;
         ck(cudaMalloc(&gp.c_ng, sizeof(int32_t)), "c_ng");
         for (int h = 0; h < 2; ++h) {
             // + 1 MiB: the MMQ slot stride rounds a blob up (<= ~0.3 MiB) and MMQ reads up to 4 KiB past a matrix;
@@ -4030,6 +4060,7 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
 
     // a launch over groups `es` (expert ids) whose blobs are at `ptrs`: grp_start are offsets into the sorted entries
     std::vector<int32_t> lstart;
+    std::vector<unsigned long long> tile_ptrs;
 #if defined(DS4_MOE_MMQ)
     // MMQ over experts es[q0, q1) at ptrs[q0] + (q - q0) * SL: three products (gate, up -> SwiGLU -> down) over their
     // sorted entries [r0, r1); the down product writes each entry's parts row through c_dst
@@ -4188,13 +4219,47 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
         lstart.clear();
         // cap_entries = NE, not this launch's count: the kernel's scratch regions are laid out by it and entries are
         // indexed absolutely (grp_start); its SwiGLU pass visits only [grp_start[0], grp_start[ng]).
-        for (int32_t e : es) lstart.push_back(first[(size_t) e]);
+        const bool batched = im.cfg.chunk_batch && strata::kernels::native_expert_batch_supported(GL);
+        bool compact = compact_grid && batched;
+        int max_group_entries = n;
+        if (compact) {
+            int64_t groups = 0;
+            max_group_entries = 0;
+            for (int32_t e : es) {
+                const int count = cnt[(size_t) e];
+                groups += ((int64_t) count + batch_cols - 1) / batch_cols;
+                max_group_entries = std::max(max_group_entries, count);
+            }
+            if (groups > 65535 || groups > gp.c_groups) {
+                std::fprintf(stderr, "ds41_moe: compact batch needs %lld groups (capacity %lld, grid limit 65535); "
+                                     "using unsplit expert groups\n", (long long) groups, (long long) gp.c_groups);
+                compact = false;
+            } else {
+                tile_ptrs.clear();
+                tile_ptrs.reserve((size_t) groups);
+                lstart.reserve((size_t) groups + 1);
+                // Each subgroup is one original (expert, z) tile with the same absolute entry indices.
+                for (size_t q = 0; q < es.size(); ++q) {
+                    const int32_t e = es[q];
+                    const int64_t end = (int64_t) first[(size_t) e] + cnt[(size_t) e];
+                    for (int64_t at = first[(size_t) e]; at < end; at += batch_cols) {
+                        lstart.push_back((int32_t) at);
+                        tile_ptrs.push_back(ptrs[q]);
+                    }
+                }
+                max_group_entries = std::min(max_group_entries, batch_cols);
+            }
+        }
+        if (!compact)
+            for (int32_t e : es) lstart.push_back(first[(size_t) e]);
         // the kernel walks entries [grp_start[g], grp_start[g+1]); groups here are not adjacent in the sorted
         // arrays, so each launch covers ONE contiguous run: callers pass experts in ascending id order and runs are
         // split where they are not adjacent (see below)
         lstart.push_back(first[(size_t) es.back()] + cnt[(size_t) es.back()]);
-        const int32_t ng = (int32_t) es.size();
-        ck(cudaMemcpyAsync(gp.c_ptr, ptrs.data(), sizeof(unsigned long long) * es.size(), cudaMemcpyHostToDevice, gp.s), "c_ptr");
+        const auto& launch_ptrs = compact ? tile_ptrs : ptrs;
+        const int32_t ng = (int32_t) launch_ptrs.size();
+        ck(cudaMemcpyAsync(gp.c_ptr, launch_ptrs.data(), sizeof(unsigned long long) * launch_ptrs.size(),
+                           cudaMemcpyHostToDevice, gp.s), "c_ptr");
         ck(cudaMemcpyAsync(gp.c_start, lstart.data(), sizeof(int32_t) * lstart.size(), cudaMemcpyHostToDevice, gp.s), "c_start");
         ck(cudaMemcpyAsync(gp.c_ng, &ng, sizeof(int32_t), cudaMemcpyHostToDevice, gp.s), "c_ng");
         cudaEvent_t e0 = nullptr, e1 = nullptr;
@@ -4203,11 +4268,10 @@ bool gpu_run_chunk(Ds41MoeImpl& im, int64_t layer, int n, const int32_t* ids, co
             cudaEventCreate(&e1);
             cudaEventRecord(e0, gp.s);
         }
-        const bool batched = im.cfg.chunk_batch && strata::kernels::native_expert_batch_supported(GL);
         if (batched) {
             if (!strata::kernels::native_expert_batch(GL, (const unsigned long long*) gp.c_ptr,
                     (const int32_t*) gp.c_start, (const int32_t*) gp.c_ng, (const int32_t*) gp.c_dst,
-                    (const int32_t*) gp.c_tokv, ng, NE, n, gp.c_xq, gp.c_scratch,
+                    (const int32_t*) gp.c_tokv, ng, NE, max_group_entries, gp.c_xq, gp.c_scratch,
                     (float*) gp.c_parts, gp.s)) {
                 std::fprintf(stderr, "ds41_moe: --chunk-batch launch bounds unsupported\n");
                 std::exit(1);
@@ -4905,7 +4969,7 @@ void Ds41MoeTier::release_chunk() {
     gp.c_stage[0] = gp.c_stage[1] = nullptr;
     for (int i = 0; i < 2; ++i) gp.c_copied[i] = gp.c_used[i] = nullptr;
     gp.s_cp = nullptr;
-    gp.c_tok = gp.c_half = 0;
+    gp.c_tok = gp.c_half = gp.c_groups = 0;
     gp.c_ready = false;
     gp.c_pre_layer = gp.c_pre_half = -1;
     gp.c_pre_e.clear();

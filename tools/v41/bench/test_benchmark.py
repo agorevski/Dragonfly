@@ -77,6 +77,7 @@ class BenchmarkTests(unittest.TestCase):
                              "--disable-cuda-graphs", "--chunk-batch", "--fused-gu",
                              "--down-mode", "4", "--gu-mode", "2", "--moe-device-input", "--moe-peer-output",
                              "--batch-columns", "8", "--batch-down-warps", "4", "--pair-gu",
+                             "--batch-tight-grid",
                              "--prefill-graph-cache", "--prefill-row-cache", "--stage-mib", "256"]
                 if mode == "occupied-multi":
                     argv += ["--gpus", "0,3"]
@@ -95,6 +96,7 @@ class BenchmarkTests(unittest.TestCase):
                                                        "STRATA_DS41_PREFILL_GRAPH_CACHE": "stale",
                                                        "STRATA_DS41_PREFILL_ROW_CACHE": "stale",
                                                        "STRATA_DS41_BATCH_PAIR_GU": "stale",
+                                                       "STRATA_DS41_BATCH_TIGHT_GRID": "stale",
                                                        "STRATA_DS41_BATCH_COLS": "stale",
                                                        "STRATA_EXP_MODE_T10": "stale",
                                                        "STRATA_DS41_BATCH_DOWN_WARPS": "stale",
@@ -141,7 +143,7 @@ class BenchmarkTests(unittest.TestCase):
                         self.assertEqual(result["environment"][name],
                                          "1" if mode == "success" else None)
                     for name in ("STRATA_DS41_PREFILL_GRAPH_CACHE", "STRATA_DS41_PREFILL_ROW_CACHE",
-                                 "STRATA_DS41_BATCH_PAIR_GU"):
+                                 "STRATA_DS41_BATCH_PAIR_GU", "STRATA_DS41_BATCH_TIGHT_GRID"):
                         self.assertEqual(result["environment"][name],
                                          "1" if mode == "success" else None)
         finally:
@@ -170,6 +172,7 @@ class BenchmarkTests(unittest.TestCase):
                 "--model", "model", "--config", "config", "--ids-file", "ids",
                 "--output", "unused"]
         for flags in (["--batch-columns", "8"], ["--batch-down-warps", "4"],
+                      ["--batch-tight-grid"],
                       ["--pair-gu"], ["--pair-gu", "--chunk-batch"]):
             with mock.patch.object(sys, "argv", base + flags), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as error:
