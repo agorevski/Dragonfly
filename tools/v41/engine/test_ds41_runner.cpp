@@ -136,11 +136,35 @@ int main(int argc, char ** argv) {
         const int32_t route[] = {7, 0};
         const float w[] = {0.5f, 0.5f};
         std::vector<float> input(size_t(g.n_embd), 0.02f), actual(size_t(g.n_embd)), baseline(size_t(g.n_embd));
+        float * device_input = nullptr, * device_output = nullptr, * landing = nullptr;
+        cudaStream_t producer = nullptr, consumer = nullptr;
+        const size_t bytes = input.size() * sizeof(float);
+        require(cudaMalloc(reinterpret_cast<void **>(&device_input), bytes) == cudaSuccess &&
+                cudaMalloc(reinterpret_cast<void **>(&device_output), bytes) == cudaSuccess &&
+                cudaMallocHost(reinterpret_cast<void **>(&landing), bytes) == cudaSuccess &&
+                cudaStreamCreateWithFlags(&producer, cudaStreamNonBlocking) == cudaSuccess &&
+                cudaStreamCreateWithFlags(&consumer, cudaStreamNonBlocking) == cudaSuccess, "seeded device buffers");
         for (int l = 0; l < count; ++l) {
             require(seeded.run(l, route, w, input.data(), actual.data()) &&
                     sharded.run(l, route, w, input.data(), baseline.data()), "seeded output execution");
             require(actual == baseline, "exact seed preserves resident/pinned numeric output");
+            std::memcpy(landing, input.data(), bytes);
+            require(cudaMemcpyAsync(device_input, landing, bytes, cudaMemcpyHostToDevice, producer) == cudaSuccess &&
+                    cudaStreamSynchronize(producer) == cudaSuccess, "seeded ready nonblocking producer");
+            require(seeded.run_to_dev(l, route, w, nullptr, device_output, device_input), "seeded device decode");
+            require(cudaMemcpyAsync(landing, device_output, bytes, cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
+                    cudaStreamSynchronize(consumer) == cudaSuccess &&
+                    std::memcmp(landing, baseline.data(), bytes) == 0, "seeded independent consumer exact output");
+            int current = -1;
+            require(cudaGetDevice(&current) == cudaSuccess && current == count - 1, "seeded device restoration");
+            for (auto & v : input) v *= -1.5f;
         }
+        const char* direct = std::getenv("STRATA_MOE_DEVICE_INPUT");
+        if (direct && direct[0] == '1' && !std::getenv("STRATA_X_HOST") &&
+            !std::getenv("DS41_CHECK_POOL_BATCH") && !std::getenv("DS4_CHECK_GPU"))
+            require(seeded.stats().device_activation_calls == count, "seeded pinned tail uses device activations");
+        cudaFree(device_input); cudaFree(device_output); cudaFreeHost(landing);
+        cudaStreamDestroy(producer); cudaStreamDestroy(consumer);
         seeded.release_cache();
         require(seeded.resident() == count - 1, "selected cache persists");
         seeded.close();
@@ -167,22 +191,66 @@ int main(int argc, char ** argv) {
     float * input = nullptr;
     float * landing = nullptr;
     cudaStream_t consumer = nullptr;
+    cudaStream_t producer = nullptr;
     require(cudaMalloc(reinterpret_cast<void **>(&output), x.size() * sizeof(float)) == cudaSuccess &&
             cudaMalloc(reinterpret_cast<void **>(&input), x.size() * sizeof(float)) == cudaSuccess &&
             cudaMallocHost(reinterpret_cast<void **>(&landing), x.size() * sizeof(float)) == cudaSuccess &&
-            cudaStreamCreateWithFlags(&consumer, cudaStreamNonBlocking) == cudaSuccess, "caller buffers");
-    require(cudaMemcpy(input, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice) == cudaSuccess, "device input");
+            cudaStreamCreateWithFlags(&consumer, cudaStreamNonBlocking) == cudaSuccess &&
+            cudaStreamCreateWithFlags(&producer, cudaStreamNonBlocking) == cudaSuccess, "caller buffers");
+    auto upload = [&](const float* data) {
+        std::memcpy(landing, data, x.size() * sizeof(float));
+        require(cudaMemcpyAsync(input, landing, x.size() * sizeof(float), cudaMemcpyHostToDevice, producer) == cudaSuccess &&
+                cudaStreamSynchronize(producer) == cudaSuccess, "ready independent producer stream");
+    };
     auto download = [&](size_t size) {
         require(cudaMemcpyAsync(landing, output, size * sizeof(float), cudaMemcpyDeviceToHost, consumer) == cudaSuccess &&
                 cudaStreamSynchronize(consumer) == cudaSuccess, "independent consumer stream");
         require(std::memcmp(landing, expected.data(), size * sizeof(float)) == 0, "bit-exact single-GPU reference");
     };
+    for (int caller = 0; caller < count; ++caller) {
+        require(cudaSetDevice(caller) == cudaSuccess, "select transfer caller");
+        float * caller_input = nullptr, * caller_output = nullptr, * caller_landing = nullptr;
+        cudaStream_t caller_producer = nullptr, caller_consumer = nullptr;
+        const size_t bytes = size_t(g.n_embd) * sizeof(float);
+        require(cudaMalloc(reinterpret_cast<void **>(&caller_input), bytes) == cudaSuccess &&
+                cudaMalloc(reinterpret_cast<void **>(&caller_output), bytes) == cudaSuccess &&
+                cudaMallocHost(reinterpret_cast<void **>(&caller_landing), bytes) == cudaSuccess &&
+                cudaStreamCreateWithFlags(&caller_producer, cudaStreamNonBlocking) == cudaSuccess &&
+                cudaStreamCreateWithFlags(&caller_consumer, cudaStreamNonBlocking) == cudaSuccess, "all-pairs buffers");
+        for (int l = 0; l < count; ++l) {
+            require(sharded.run(l, ids.data(), weights.data(), x.data(), actual.data()), "all-pairs reference");
+            std::memcpy(caller_landing, x.data(), bytes);
+            require(cudaMemcpyAsync(caller_input, caller_landing, bytes, cudaMemcpyHostToDevice, caller_producer) == cudaSuccess &&
+                    cudaStreamSynchronize(caller_producer) == cudaSuccess, "all-pairs ready producer");
+            require(sharded.run_to_dev(l, ids.data(), weights.data(), nullptr, caller_output, caller_input),
+                    "all-pairs device decode");
+            require(cudaMemcpyAsync(caller_landing, caller_output, bytes, cudaMemcpyDeviceToHost, caller_consumer) == cudaSuccess &&
+                    cudaStreamSynchronize(caller_consumer) == cudaSuccess &&
+                    std::memcmp(caller_landing, actual.data(), bytes) == 0, "all-pairs exact consumer");
+            int current = -1;
+            require(cudaGetDevice(&current) == cudaSuccess && current == caller, "all-pairs context restoration");
+        }
+        cudaFree(caller_input); cudaFree(caller_output); cudaFreeHost(caller_landing);
+        cudaStreamDestroy(caller_producer); cudaStreamDestroy(caller_consumer);
+    }
+    require(cudaSetDevice(count - 1) == cudaSuccess, "restore primary test caller");
     for (int l = 0; l < count; ++l) {
         require(reference.run_to_dev(l, ids.data(), weights.data(), x.data(), output), "reference decode");
         require(cudaMemcpy(expected.data(), output, g.n_embd * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess, "reference read");
         require(sharded.run_to_dev(l, ids.data(), weights.data(), x.data(), output), "sharded decode");
         download(size_t(g.n_embd));
+        upload(x.data());
         require(sharded.run_to_dev(l, ids.data(), weights.data(), nullptr, output, input), "sharded device input");
+        download(size_t(g.n_embd));
+        auto changed = x;
+        for (auto & v : changed) v *= -0.5f;
+        require(reference.run_to_dev(l, ids.data(), weights.data(), changed.data(), output), "changed reference decode");
+        require(cudaMemcpy(expected.data(), output, g.n_embd * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess,
+                "changed reference read");
+        require(std::any_of(expected.begin(), expected.begin() + g.n_embd, [](float v) { return v != 0; }),
+                "nonzero decode reference");
+        upload(changed.data());
+        require(sharded.run_to_dev(l, ids.data(), weights.data(), nullptr, output, input), "changed device input");
         download(size_t(g.n_embd));
         require(reference.run_multi_to_dev(l, n, ids.data(), weights.data(), x.data(), output), "reference multi");
         require(cudaMemcpy(expected.data(), output, x.size() * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess, "reference multi read");
@@ -192,8 +260,6 @@ int main(int argc, char ** argv) {
         require(cudaMemcpy(expected.data(), output, x.size() * sizeof(float), cudaMemcpyDeviceToHost) == cudaSuccess, "reference chunk read");
         require(sharded.run_chunk_dev(l, n, ids.data(), weights.data(), x.data(), output), "sharded chunk");
         download(x.size());
-        auto changed = x;
-        for (auto & v : changed) v *= -0.5f;
         require(sharded.run_chunk_dev(l, n, ids.data(), weights.data(), changed.data(), output), "changed input");
         sharded.release_chunk();
         require(sharded.run_chunk_dev(l, n, ids.data(), weights.data(), x.data(), output), "chunk reallocate");
@@ -205,13 +271,18 @@ int main(int argc, char ** argv) {
     std::printf("aggregate: hits=%lld pcie=%lld cpu=%lld file=%lld\n", (long long) stats.hits,
                 (long long) stats.pcie, (long long) stats.cpu, (long long) stats.file_tier);
     require(stats.hits > 0 && stats.pcie > 0 && stats.file_tier == 0, "aggregate counters");
+    const char* direct = std::getenv("STRATA_MOE_DEVICE_INPUT");
+    const bool host_diagnostic = std::getenv("STRATA_X_HOST") || std::getenv("DS41_CHECK_POOL_BATCH") ||
+                                 std::getenv("DS4_CHECK_GPU");
+    require(stats.device_activation_calls == ((direct && direct[0] == '1' && !host_diagnostic) ? (2 + count) * count : 0),
+            "opt-in selects device activation path only");
     sharded.release_cache();
     require(sharded.resident() == 6 * count, "cache persists across requests");
     sharded.reset_stats();
     require(sharded.stats().lookups() == 0, "aggregate reset");
     sharded.close();
     require(!sharded.sharded(), "close");
-    cudaFree(output); cudaFree(input); cudaFreeHost(landing); cudaStreamDestroy(consumer);
+    cudaFree(output); cudaFree(input); cudaFreeHost(landing); cudaStreamDestroy(consumer); cudaStreamDestroy(producer);
     std::printf("%d-GPU runner: mixed Q2_K/Q3_K, pinned tail, decode/multi/chunk, changed input, "
                 "independent stream, device restoration and lifecycle PASS\n", count);
     return 0;

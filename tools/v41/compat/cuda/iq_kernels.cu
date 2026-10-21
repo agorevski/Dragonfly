@@ -3829,11 +3829,20 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
             else if (em == 4) native_gu_amd_kernel<T, 4><<<ggu_amd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); \
             else native_gu_amd_kernel<T, 2><<<ggu_amd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
     // the AMD layouts cover the IQ packs' gate/up types; Unsloth's Q4_K / Q5_K take the CUDA layout below
+    static const bool q2_gu_optin = [] {
+        const char* v = std::getenv("STRATA_EXP_MODE_T10");
+        return v && (std::atoi(v) == 2 || std::atoi(v) == 4);
+    }();
     const bool amd_gu = L.gu_type == 16 || L.gu_type == 17 || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 ||
                         L.gu_type == 23 || L.gu_type == 29 || L.gu_type == 42 ||
-                        L.gu_type == 143 || L.gu_type == 11;   // Strata-DS4 fork: PTQ1_0 / Q3_K (V4.1 GSQ)
+                        L.gu_type == 143 || L.gu_type == 11 ||
+                        (L.gu_type == 10 && (q2_gu_optin || g_exp_mode == 2 || g_exp_mode == 4));
     if ((em == 1 || em == 2 || em == 4) && amd_gu && (L.up_type < 0 || L.up_type == L.gu_type)) {
         switch (L.gu_type) {
+            case 10:
+                if (em == 4) native_gu_amd_kernel<10, 4><<<ggu_amd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+                else native_gu_amd_kernel<10, 2><<<ggu_amd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+                break;
             STRATA_GU_AMD(16) STRATA_GU_AMD(17) STRATA_GU_AMD(18) STRATA_GU_AMD(21) STRATA_GU_AMD(22) STRATA_GU_AMD(23)
             STRATA_GU_AMD(29) STRATA_GU_AMD(42) STRATA_GU_AMD(143) STRATA_GU_AMD(11)
         }

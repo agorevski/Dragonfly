@@ -114,12 +114,17 @@ def command(args):
 def run_protocol(args, ids, result):
     events = queue.Queue()
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("STRATA_", "DS41_", "GGML_"))}
+           if not k.startswith(("STRATA_", "DS41_", "GGML_", "MIMO_"))}
     env["CUDA_VISIBLE_DEVICES"] = args.gpus
     env["STRATA_V41_CONFIG"] = str(args.config)
     if args.step_max is not None:
         env["STRATA_SERVE_STEP_MAX"] = str(args.step_max)
     switches = {
+        "STRATA_DS41_PREFILL_GRAPH_CACHE": args.prefill_graph_cache,
+        "STRATA_DS41_PREFILL_ROW_CACHE": args.prefill_row_cache,
+        "STRATA_DS41_BATCH_PAIR_GU": args.pair_gu,
+        "STRATA_MOE_DEVICE_INPUT": args.moe_device_input,
+        "STRATA_MOE_PEER_OUTPUT": args.moe_peer_output,
         "STRATA_DS41_BATCH_FUSED_GU": args.fused_gu,
         "STRATA_DEVICE_ACTIVATIONS": args.device_activations,
         "STRATA_TIER_GRAPH": args.tier_graph,
@@ -129,11 +134,26 @@ def run_protocol(args, ids, result):
     for name, enabled in switches.items():
         if enabled:
             env[name] = "1"
+    if args.down_mode is not None:
+        env["STRATA_EXP_MODE_T11"] = str(args.down_mode)
+    if args.gu_mode is not None:
+        env["STRATA_EXP_MODE_T10"] = str(args.gu_mode)
+    if args.batch_columns is not None:
+        env["STRATA_DS41_BATCH_COLS"] = str(args.batch_columns)
+    if args.batch_down_warps is not None:
+        env["STRATA_DS41_BATCH_DOWN_WARPS"] = str(args.batch_down_warps)
+    if args.stage_mib is not None:
+        env["MIMO_CHUNK_STAGE_MIB"] = str(args.stage_mib)
     result["environment"] = {"CUDA_VISIBLE_DEVICES": args.gpus,
                              "STRATA_V41_CONFIG": str(args.config),
                              "STRATA_SERVE_STEP_MAX": env.get("STRATA_SERVE_STEP_MAX"),
                              **{name: env.get(name) for name in switches},
-                             "engine_overrides": "all other STRATA_*, DS41_*, GGML_* removed"}
+                             "STRATA_EXP_MODE_T11": env.get("STRATA_EXP_MODE_T11"),
+                             "STRATA_EXP_MODE_T10": env.get("STRATA_EXP_MODE_T10"),
+                             "STRATA_DS41_BATCH_COLS": env.get("STRATA_DS41_BATCH_COLS"),
+                             "STRATA_DS41_BATCH_DOWN_WARPS": env.get("STRATA_DS41_BATCH_DOWN_WARPS"),
+                             "MIMO_CHUNK_STAGE_MIB": env.get("MIMO_CHUNK_STAGE_MIB"),
+                             "engine_overrides": "all other STRATA_*, DS41_*, GGML_*, MIMO_* removed"}
     start = time.monotonic()
     process = subprocess.Popen(result["command"], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -275,7 +295,27 @@ def main():
     parser.add_argument("--chunk-batch", action="store_true", help="opt in to four-column expert kernels")
     parser.add_argument("--fused-gu", action="store_true",
                         help="opt in to fused gate/up activation and quantization; requires --chunk-batch")
+    parser.add_argument("--down-mode", type=int, choices=(0, 1, 2, 4),
+                        help="explicit Q3_K down-projection row/warp layout")
+    parser.add_argument("--gu-mode", type=int, choices=(0, 2, 4),
+                        help="explicit Q2_K gate/up row/warp layout")
+    parser.add_argument("--batch-columns", type=int, choices=(4, 8),
+                        help="explicit expert batch tile width; requires --chunk-batch")
+    parser.add_argument("--batch-down-warps", type=int, choices=(4, 8),
+                        help="explicit expert down-projection block geometry; requires --chunk-batch")
+    parser.add_argument("--pair-gu", action="store_true",
+                        help="share gate/up activation loads; requires --chunk-batch --fused-gu")
+    parser.add_argument("--prefill-graph-cache", action="store_true",
+                        help="cache bounded prefill init/finish graphs")
+    parser.add_argument("--prefill-row-cache", action="store_true",
+                        help="reuse column-local prefill row maps across layers")
+    parser.add_argument("--stage-mib", type=int, choices=(32, 64, 128, 256, 512),
+                        help="per-half chunk expert staging MiB; actual allocation may be capped")
     parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
+    parser.add_argument("--moe-device-input", action="store_true",
+                        help="keep sharded decode activations on devices; requires --device-activations")
+    parser.add_argument("--moe-peer-output", action="store_true",
+                        help="copy remote decode output before the tier completion wait")
     parser.add_argument("--tier-graph", action="store_true", help="opt in to expert-tier graph capture")
     parser.add_argument("--dma-overlap", action="store_true", help="opt in to expert demand-copy overlap")
     parser.add_argument("--disable-cuda-graphs", action="store_true",
@@ -290,6 +330,14 @@ def main():
     args = parser.parse_args()
     if args.fused_gu and not args.chunk_batch:
         parser.error("--fused-gu requires --chunk-batch")
+    if args.moe_device_input and not args.device_activations:
+        parser.error("--moe-device-input requires --device-activations")
+    if args.batch_columns is not None and not args.chunk_batch:
+        parser.error("--batch-columns requires --chunk-batch")
+    if args.batch_down_warps is not None and not args.chunk_batch:
+        parser.error("--batch-down-warps requires --chunk-batch")
+    if args.pair_gu and not (args.chunk_batch and args.fused_gu):
+        parser.error("--pair-gu requires --chunk-batch --fused-gu")
     gpu_ids = args.gpus.split(",")
     if any(not item.isdigit() for item in gpu_ids) or len(set(map(int, gpu_ids))) != len(gpu_ids):
         parser.error("--gpus must list distinct nonnegative physical GPU ordinals")

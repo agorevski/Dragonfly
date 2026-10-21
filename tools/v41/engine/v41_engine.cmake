@@ -126,6 +126,16 @@ if(STRATA_DS41_BUILD_TESTS)
         add_executable(test_ds41_${_test} "${_v41_dir}/test_ds41_${_test}.cpp")
         target_link_libraries(test_ds41_${_test} PRIVATE ds41_dense ds41_kernels_cpu)
     endforeach()
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME ds41_span_cache COMMAND "${Python3_EXECUTABLE}" "${_v41_dir}/test_ds41_standard.py"
+            --engine "$<TARGET_FILE:test_ds41_dense>" --span-cache-test --work "${CMAKE_CURRENT_BINARY_DIR}/span-cache-fixture")
+        if(STRATA_DS41_CUDA)
+            target_compile_definitions(test_ds41_dense PRIVATE DS41_HAVE_CUDA)
+            add_test(NAME ds41_span_cache_cuda COMMAND "${Python3_EXECUTABLE}" "${_v41_dir}/test_ds41_standard.py"
+                --engine "$<TARGET_FILE:test_ds41_dense>" --span-cache-test --backend cuda
+                --work "${CMAKE_CURRENT_BINARY_DIR}/span-cache-cuda-fixture")
+        endif()
+    endif()
     add_executable(test_ds41_graphs "${_v41_dir}/test_ds41_graphs.cpp")
     target_include_directories(test_ds41_graphs PRIVATE "${_v41_dir}" "${_ds41_ggml_src}")
     target_link_libraries(test_ds41_graphs PRIVATE ggml ggml-cpu ggml-base)
@@ -169,10 +179,26 @@ if(STRATA_DS41_BUILD_TESTS)
         target_link_libraries(test_ds41_batch PRIVATE ds41_moe_cuda ggml-cpu CUDA::cudart)
         add_test(NAME ds41_batch COMMAND test_ds41_batch)
         set_tests_properties(ds41_batch PROPERTIES SKIP_RETURN_CODE 77
-            ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=0")
+            ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=0;STRATA_DS41_BATCH_COLS=4;STRATA_DS41_BATCH_PAIR_GU=0")
         add_test(NAME ds41_batch_fused_gu COMMAND test_ds41_batch)
         set_tests_properties(ds41_batch_fused_gu PROPERTIES SKIP_RETURN_CODE 77
-            ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=1")
+            ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=1;STRATA_DS41_BATCH_COLS=4;STRATA_DS41_BATCH_PAIR_GU=0")
+        add_test(NAME ds41_batch_wide_unfused COMMAND test_ds41_batch --quick)
+        set_tests_properties(ds41_batch_wide_unfused PROPERTIES SKIP_RETURN_CODE 77
+            ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=0;STRATA_DS41_BATCH_COLS=8;STRATA_DS41_BATCH_PAIR_GU=0")
+        add_test(NAME ds41_batch_pair_implies_fused COMMAND test_ds41_batch --quick)
+        set_tests_properties(ds41_batch_pair_implies_fused PROPERTIES SKIP_RETURN_CODE 77
+            ENVIRONMENT "STRATA_DS41_BATCH_FUSED_GU=0;STRATA_DS41_BATCH_COLS=4;STRATA_DS41_BATCH_PAIR_GU=1")
+        foreach(_cols 4 8)
+            add_test(NAME ds41_batch_down4_cols${_cols} COMMAND test_ds41_batch --probe)
+            set_tests_properties(ds41_batch_down4_cols${_cols} PROPERTIES SKIP_RETURN_CODE 77
+                ENVIRONMENT "STRATA_DS41_BATCH_DOWN_WARPS=4;STRATA_DS41_BATCH_COLS=${_cols};STRATA_DS41_BATCH_PAIR_GU=1;STRATA_DS41_BATCH_FUSED_GU=1")
+            foreach(_pair 0 1)
+                add_test(NAME ds41_batch_cols${_cols}_pair${_pair} COMMAND test_ds41_batch --quick)
+                set_tests_properties(ds41_batch_cols${_cols}_pair${_pair} PROPERTIES SKIP_RETURN_CODE 77
+                    ENVIRONMENT "STRATA_DS41_BATCH_COLS=${_cols};STRATA_DS41_BATCH_PAIR_GU=${_pair};STRATA_DS41_BATCH_FUSED_GU=1")
+            endforeach()
+        endforeach()
         add_executable(test_ds41_moe_gpu "${_v41_dir}/test_ds41_moe.cpp")
         target_compile_definitions(test_ds41_moe_gpu PRIVATE DS41_TEST_CUDA=1)
         target_link_libraries(test_ds41_moe_gpu PRIVATE ds41_moe_cuda ggml-cpu CUDA::cudart)

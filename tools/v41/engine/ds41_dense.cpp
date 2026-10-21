@@ -187,6 +187,8 @@ struct Ds41Dense::Impl {
     // tensors (upload_inputs) or their reallocation (alloc_state) resets it.
     int64_t span_memo_pos0 = -1;
     int span_memo_col0 = -1, span_memo_n = -1;
+    bool span_row_cache = env_on("STRATA_DS41_PREFILL_ROW_CACHE", false);
+    std::vector<int> span_row_n;
     ggml_tensor * i_lastblk = nullptr;    // F32 [NC]   (nvis - 1) / block size: the pinned candidate block (ratio 1)
     ggml_tensor * i_eng[2] = {};          // F32 [EC * ED, NC]  Engram rows
     ggml_tensor * neg_ramp = nullptr;     // F32 [cmax1]  -i     (constant)
@@ -216,6 +218,23 @@ struct Ds41Dense::Impl {
     struct GKey { int il, kind; int64_t cap, n; bool operator<(const GKey & o) const {
         return std::tie(il, kind, cap, n) < std::tie(o.il, o.kind, o.cap, o.n); } };
     std::map<GKey, ggml_cgraph *> graphs;
+    struct SpanKey {
+        int kind, col0, n;
+        bool operator<(const SpanKey & o) const {
+            return std::tie(kind, col0, n) < std::tie(o.kind, o.col0, o.n);
+        }
+    };
+    struct SpanGraph {
+        ggml_context * ctx = nullptr;
+        ggml_cgraph * graph = nullptr;
+        uint64_t used = 0;
+        ~SpanGraph() { if (ctx) ggml_free(ctx); }
+    };
+    // Init/finish have no layer or compressed-cap dependency. Each entry owns its node storage; never put these
+    // graphs in pf_meta, whose next resize/build would invalidate them. At most 128 small (64-node) graphs.
+    std::map<SpanKey, std::unique_ptr<SpanGraph>> span_graphs;
+    uint64_t span_graph_clock = 0;
+    bool span_graph_cache = env_on("STRATA_DS41_PREFILL_GRAPH_CACHE", false);
     std::map<int, ggml_tensor *> logits_out;   // decode head graph output, by nrows
     std::map<int, ggml_tensor *> predict_out;  // predict graph output, by layer
     std::map<std::pair<int, int>, ggml_tensor *> predict_out_n;   // predict_multi output, by (layer, pass width)
@@ -223,6 +242,7 @@ struct Ds41Dense::Impl {
     std::map<std::pair<int, int>, std::vector<ggml_tensor *>> fpredict_ahead; // finish_predict_ahead extra outputs
 
     ~Impl() {
+        span_graphs.clear();
         if (nbuf) ggml_backend_buffer_free(nbuf);
         if (nctx) ggml_free(nctx);
         if (sbuf) ggml_backend_buffer_free(sbuf);
@@ -240,6 +260,7 @@ struct Ds41Dense::Impl {
         return it != w.t.end() ? it->second : BL(il, "ffn_gate_inp.weight");
     }
     bool compute(ggml_cgraph * gf, bool cached);
+    bool compute_span(int kind, int col0, int n);
     bool upload_inputs(const int * tids, int n, int pos0);
 };
 
@@ -938,6 +959,33 @@ static ggml_cgraph * build_init(Ds41Dense::Impl & im, ggml_context * gc, int64_t
     return gf;
 }
 
+bool Ds41Dense::Impl::compute_span(int kind, int col0, int n) {
+    const SpanKey key { kind, col0, n };
+    auto it = span_graphs.find(key);
+    const double t0 = g_dprof_on ? dprof_now() : 0;
+    if (it == span_graphs.end()) {
+        if (span_graphs.size() == 128) {
+            auto oldest = std::min_element(span_graphs.begin(), span_graphs.end(),
+                [](const auto & a, const auto & b) { return a.second->used < b.second->used; });
+            ggml_backend_synchronize(backend);
+            allo_dec.graph_epoch.erase(oldest->second->graph);
+            span_graphs.erase(oldest);
+        }
+        auto entry = std::make_unique<SpanGraph>();
+        ggml_init_params p = { ggml_tensor_overhead() * 256 + ggml_graph_overhead_custom(64, false), nullptr, true };
+        entry->ctx = ggml_init(p);
+        if (!entry->ctx) { err = "span graph context allocation failed"; return false; }
+        entry->graph = kind == 0 ? build_init(*this, entry->ctx, n, col0) : build_finish(*this, entry->ctx, n, col0);
+        it = span_graphs.emplace(key, std::move(entry)).first;
+    }
+    it->second->used = ++span_graph_clock;
+    if (g_dprof_on && kind == 1) g_dprof[5] += dprof_now() - t0;
+    g_dprof_slot = 0;
+    const bool ok = compute(it->second->graph, true);
+    g_dprof_slot = -1;
+    return ok;
+}
+
 // ================================================================== public API
 
 Ds41Dense::Ds41Dense() : p_(new Impl()) {}
@@ -1010,6 +1058,8 @@ bool Ds41Dense::set_columns(int nc) {
     // every cached graph holds views of the old columns (their addresses are fixed at the first allocation), and the
     // allocators remember graphs by address - all of it goes, and is rebuilt lazily for the new tensors
     im.graphs.clear();
+    im.span_graphs.clear();
+    im.span_row_n.clear();
     im.logits_out.clear();
     im.predict_out.clear();
     im.predict_out_n.clear();
@@ -1227,6 +1277,7 @@ static bool engram_ready(Ds41Dense::Impl & im) {
 bool Ds41Dense::Impl::upload_inputs(const int * tids, int n, int pos0) {
     Impl & im = *this;
     im.span_memo_pos0 = -1;   // this writes i_widx / i_wslot / i_sidx / i_sslot: upload_span's memo is stale
+    im.span_row_n.clear();
     const int64_t D = im.D, SWA = im.SWA, RAW = im.RAW;
     // embeddings (F16 rows on the mmap)
     im.host_emb.resize((size_t) (D * n));
@@ -1361,6 +1412,7 @@ bool Ds41Dense::begin_batch(const int * tids, int B, int pos0) {
     // per-sub-batch pass_cap (the compressed rows each sub-batch ranks over) - depends only on (pos0, len)
     const int64_t nb = (B + im.S - 1) / im.S;
     im.span_cap.assign((size_t) nb, { 0, 0, 0 });
+    if (im.span_row_cache) im.span_row_n.assign((size_t) nb, 0);
     for (int64_t i = 0; i < nb; ++i)
         span_pass_caps(im, pos0 + (int) (i * im.S), (int) std::min<int64_t>(im.S, (int64_t) B - i * im.S),
                        im.span_cap[(size_t) i].data());
@@ -1368,6 +1420,10 @@ bool Ds41Dense::begin_batch(const int * tids, int B, int pos0) {
     std::vector<uint8_t> meta(ggml_tensor_overhead() * 256 + ggml_graph_overhead_custom(64, false));
     for (int64_t i = 0; i < nb; ++i) {
         const int64_t c0 = i * im.S, sn = std::min<int64_t>(im.S, (int64_t) B - c0);
+        if (im.span_graph_cache) {
+            if (!im.compute_span(0, (int) c0, (int) sn)) { im.err = "batch init failed"; return false; }
+            continue;
+        }
         ggml_init_params p = { meta.size(), meta.data(), true };
         ggml_context * gc = ggml_init(p);
         ggml_cgraph * gf = build_init(im, gc, sn, c0);
@@ -1395,7 +1451,12 @@ static bool upload_span(Ds41Dense::Impl & im, int col0, int n) {
     im.span_memo_pos0 = (int64_t) im.batch_pos0;
     im.span_memo_col0 = col0;
     im.span_memo_n = n;
-    {
+    // The row maps have disjoint column slices and remain valid for the whole batch. Only the ring-slot maps
+    // below share storage across spans; those still have to be uploaded on each span switch.
+    const bool rows_cacheable = im.span_row_cache && n <= im.S && si < im.span_row_n.size();
+    if (im.span_row_cache && n > im.S) std::fill(im.span_row_n.begin(), im.span_row_n.end(), 0);
+    const bool rows_cached = rows_cacheable && im.span_row_n[si] == n;
+    if (!rows_cached) {
         std::vector<int32_t> widx((size_t) (im.SWA * n));
         for (int t = 0; t < n; ++t) {
             const int64_t p = pbase + t;
@@ -1406,7 +1467,7 @@ static bool upload_span(Ds41Dense::Impl & im, int col0, int n) {
         }
         ggml_backend_tensor_set(im.i_widx, widx.data(), (size_t) col0 * im.SWA * 4, widx.size() * 4);
     }
-    {
+    if (!rows_cached) {
         std::vector<int32_t> si((size_t) (2 * n));
         auto row = [&](int64_t q) { return (int32_t) (q >= pbase ? 2 + (q - pbase) : q % 2); };
         for (int t = 0; t < n; ++t) {
@@ -1416,6 +1477,7 @@ static bool upload_span(Ds41Dense::Impl & im, int col0, int n) {
         }
         ggml_backend_tensor_set(im.i_sidx, si.data(), (size_t) col0 * 2 * 4, si.size() * 4);
     }
+    if (rows_cacheable) im.span_row_n[si] = n;
     {
         const int64_t k = std::min<int64_t>(n, im.RAW);
         std::vector<int32_t> ws((size_t) k);
@@ -1486,6 +1548,7 @@ bool Ds41Dense::finish_span(int il, int col0, int n) {
     Impl & im = *p_;
     (void) il;
     if (col0 < 0 || n < 1 || im.S < 1 || col0 % im.S != 0 || (int64_t) col0 + n > im.batch) { im.err = "bad span"; return false; }
+    if (im.span_graph_cache) return im.compute_span(1, col0, n);
     const double tf0 = g_dprof_on ? dprof_now() : 0;
     std::vector<uint8_t> meta(ggml_tensor_overhead() * 64 + ggml_graph_overhead_custom(64, false));
     ggml_init_params p = { meta.size(), meta.data(), true };

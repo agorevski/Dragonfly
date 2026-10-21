@@ -74,7 +74,10 @@ class BenchmarkTests(unittest.TestCase):
                         "--step-max", "0"]
                 if mode == "success":
                     argv += ["--device-activations", "--tier-graph", "--dma-overlap",
-                             "--disable-cuda-graphs", "--chunk-batch", "--fused-gu"]
+                             "--disable-cuda-graphs", "--chunk-batch", "--fused-gu",
+                             "--down-mode", "4", "--gu-mode", "2", "--moe-device-input", "--moe-peer-output",
+                             "--batch-columns", "8", "--batch-down-warps", "4", "--pair-gu",
+                             "--prefill-graph-cache", "--prefill-row-cache", "--stage-mib", "256"]
                 if mode == "occupied-multi":
                     argv += ["--gpus", "0,3"]
                 def capture(cmd):
@@ -86,6 +89,16 @@ class BenchmarkTests(unittest.TestCase):
                 memory = iter([100, 100, 39]) if mode == "memory" else None
                 with mock.patch.object(sys, "argv", argv), mock.patch.object(B, "capture", capture), \
                         mock.patch.dict(B.os.environ, {"STRATA_DEVICE_ACTIVATIONS": "stale",
+                                                       "STRATA_EXP_MODE_T11": "stale",
+                                                       "STRATA_MOE_DEVICE_INPUT": "stale",
+                                                       "STRATA_MOE_PEER_OUTPUT": "stale",
+                                                       "STRATA_DS41_PREFILL_GRAPH_CACHE": "stale",
+                                                       "STRATA_DS41_PREFILL_ROW_CACHE": "stale",
+                                                       "STRATA_DS41_BATCH_PAIR_GU": "stale",
+                                                       "STRATA_DS41_BATCH_COLS": "stale",
+                                                       "STRATA_EXP_MODE_T10": "stale",
+                                                       "STRATA_DS41_BATCH_DOWN_WARPS": "stale",
+                                                       "MIMO_CHUNK_STAGE_MIB": "stale",
                                                        "STRATA_DS41_BATCH_FUSED_GU": "stale",
                                                        "STRATA_TIER_GRAPH": "stale",
                                                        "STRATA_DMA_OVERLAP": "stale",
@@ -102,6 +115,11 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertEqual(result["environment"]["STRATA_SERVE_STEP_MAX"], "0")
                     self.assertEqual(result["environment"]["CUDA_VISIBLE_DEVICES"], "0")
                     self.assertIn("--chunk-batch", result["command"])
+                    self.assertEqual(result["environment"]["STRATA_EXP_MODE_T11"], "4")
+                    self.assertEqual(result["environment"]["STRATA_EXP_MODE_T10"], "2")
+                    self.assertEqual(result["environment"]["STRATA_DS41_BATCH_COLS"], "8")
+                    self.assertEqual(result["environment"]["STRATA_DS41_BATCH_DOWN_WARPS"], "4")
+                    self.assertEqual(result["environment"]["MIMO_CHUNK_STAGE_MIB"], "256")
                 else:
                     self.assertIn("error", result)
                     if mode.startswith("occupied"):
@@ -111,8 +129,19 @@ class BenchmarkTests(unittest.TestCase):
                         with self.assertRaises(ProcessLookupError):
                             B.os.kill(result["pid"], 0)
                 if not mode.startswith("occupied"):
+                    if mode != "success":
+                        self.assertIsNone(result["environment"]["STRATA_EXP_MODE_T11"])
+                        self.assertIsNone(result["environment"]["STRATA_EXP_MODE_T10"])
+                        self.assertIsNone(result["environment"]["STRATA_DS41_BATCH_COLS"])
+                        self.assertIsNone(result["environment"]["STRATA_DS41_BATCH_DOWN_WARPS"])
+                        self.assertIsNone(result["environment"]["MIMO_CHUNK_STAGE_MIB"])
                     for name in ("STRATA_DS41_BATCH_FUSED_GU", "STRATA_DEVICE_ACTIVATIONS", "STRATA_TIER_GRAPH",
-                                 "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS"):
+                                 "STRATA_DMA_OVERLAP", "GGML_CUDA_DISABLE_GRAPHS",
+                                 "STRATA_MOE_DEVICE_INPUT", "STRATA_MOE_PEER_OUTPUT"):
+                        self.assertEqual(result["environment"][name],
+                                         "1" if mode == "success" else None)
+                    for name in ("STRATA_DS41_PREFILL_GRAPH_CACHE", "STRATA_DS41_PREFILL_ROW_CACHE",
+                                 "STRATA_DS41_BATCH_PAIR_GU"):
                         self.assertEqual(result["environment"][name],
                                          "1" if mode == "success" else None)
         finally:
@@ -126,6 +155,26 @@ class BenchmarkTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as error:
                 B.main()
         self.assertEqual(error.exception.code, 2)
+
+    def test_peer_input_requires_device_activations(self):
+        argv = ["benchmark", "--engine", "engine", "--engine-revision", "test",
+                "--model", "model", "--config", "config", "--ids-file", "ids",
+                "--output", "unused", "--moe-device-input"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                B.main()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_batch_tuning_requires_matching_dispatch(self):
+        base = ["benchmark", "--engine", "engine", "--engine-revision", "test",
+                "--model", "model", "--config", "config", "--ids-file", "ids",
+                "--output", "unused"]
+        for flags in (["--batch-columns", "8"], ["--batch-down-warps", "4"],
+                      ["--pair-gu"], ["--pair-gu", "--chunk-batch"]):
+            with mock.patch.object(sys, "argv", base + flags), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    B.main()
+            self.assertEqual(error.exception.code, 2)
 
 
 if __name__ == "__main__":

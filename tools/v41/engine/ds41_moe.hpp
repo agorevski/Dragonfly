@@ -445,8 +445,10 @@ public:
     /// the dense half's routed tensor): the same bits as `run`'s host sum, without its parts readback and upload.
     /// GPU tier only (false in cpu_only). Optional `x_dev` overrides `x` (which may then be null): same-device,
     /// ready input, valid until this synchronous call returns. CPU-served misses read it back only when needed.
+    /// Explicit input/output device IDs permit remote rows: input is staged on the tier stream; output is
+    /// reduced locally then copied on that same stream before returning. -1 means the current tier device.
     bool run_to_dev(int64_t layer, const int32_t* ids6, const float* w6, const float* x, void* out_dev,
-                    const void* x_dev = nullptr);
+                    const void* x_dev = nullptr, int input_device = -1, int output_device = -1);
     /// The same with `x` already on the device (the engine's attention output).  CUDA modes only.
     bool run_dev(int64_t layer, const int32_t* ids6, const float* w6, const void* x_dev, float* out);
 

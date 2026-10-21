@@ -154,12 +154,22 @@ def main():
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--dspark-built", action="store_true")
     parser.add_argument("--rollback-test", action="store_true")
+    parser.add_argument("--span-cache-test", action="store_true")
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     directory = args.work.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     try:
-        model, config_path, config = fixture(directory, nonzero=args.rollback_test)
+        model, config_path, config = fixture(directory, nonzero=args.rollback_test or args.span_cache_test)
+        if args.span_cache_test:
+            flag = "--span-cache-cuda-test" if args.backend == "cuda" else "--span-cache-test"
+            result = subprocess.run([str(args.engine.resolve()), flag, str(model)],
+                                    env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),
+                                    text=True, capture_output=True, timeout=180)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            print(result.stdout, end="")
+            return
         if args.rollback_test:
             result = subprocess.run([str(args.engine.resolve()), "--rollback-test", str(model)],
                                     env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),
@@ -279,7 +289,8 @@ def main():
             expert_command = command.copy()
             expert_command[expert_command.index("-m") + 1] = str(expert_model)
             expert_command[expert_command.index("--experts") + 1] = "gpu"
-            expert_command += ["--arena-gib", "0", "--pf-b", "0", "--pcie", "0"]
+            # These cache/activation fixtures exercise one tier, independent of the visible-device count.
+            expert_command += ["--expert-gpus", "0", "--arena-gib", "0", "--pf-b", "0", "--pcie", "0"]
             for deferred in (False, True):
                 for slots, margin, capacity in (("auto", "10000", 0), ("auto", "0", 4), ("1", "0", 1)):
                     extra = ["--slots", slots, "--vram-margin", margin]

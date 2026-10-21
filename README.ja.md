@@ -1,11 +1,39 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
-    <img src="apps/host/public/brand/strata-lockup-light.svg" alt="Strata" width="380">
-  </picture>
-</p>
+<h1 align="center">🪶 Dragonfly（トンボ）</h1>
 
 <p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <b>日本語</b> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
+
+<p align="center"><b>パレート フロンティアで精度を実現する</b><br>
+DeepSeek V4.1 Flash 1017 向けに最適化された Strata フォーク · 推論パフォーマンスの限界を押し広げる</p>
+
+<p align="center"><img src="docs/media/dragonfly.png" width="720" alt="Dragonfly がパレート フロンティアを飛ぶ"></p>
+
+## Dragonfly とは
+
+**Dragonfly は、パレート フロンティアで動作する DeepSeek V4.1 Flash 1017 です。**
+
+トンボは蛮力で飛ぶのではありません。4 組の独立制御された翅で、最小限のエネルギーで絶え間ない微調整を行います。Dragonfly は同じ原理を推論に適用します。主動的に特化し、実行を正確に制御し、無駄を排除し、最大パフォーマンスを引き出します。
+
+### デザイン哲学
+
+- **汎用ではなく、専化。** すべての最適化は DeepSeek V4.1 Flash 1017 の正確なアーキテクチャと実行パターンを対象としています。
+- **強力ではなく、精密。** 4 つの独立した制御面（実行、メモリ、スケジューリング、ハードウェア）を細かく調整。単一の鈍い道具ではありません。
+- **前沿にて。** 柔軟性とパフォーマンスを交換してパレート フロンティアに到達—1 つのメトリクスを改善できない点では別のメトリクスが犠牲になります。
+
+### Dragonfly vs. Strata
+
+| | Dragonfly | Strata |
+|---|---|---|
+| **最適化対象** | DeepSeek V4.1 Flash 1017 のみ | 複数モデル |
+| **設計哲学** | 専化された精密性 | 汎用的な柔軟性 |
+| **ユースケース** | 単一モデル最大スループット/レイテンシ | 広範なハードウェア & モデルサポート |
+| **融合量化** | ✅ はい | ❌ いいえ |
+| **エキスパート常駐性チューニング** | ✅ キャリブレーション & 測定済み | ❌ いいえ |
+| **ドロップイン置き換え** | ❌ いいえ | ✅ はい |
+
+**Strata を使用する場合** マルチモデル サポートまたは広範なハードウェア互換性が必要な場合。
+**Dragonfly を使用する場合** DeepSeek V4.1 Flash 1017 での最大パフォーマンスが必要な場合。
+
+---
 
 <h3 align="center">最先端のモデルを、手元のゲーミングPCで動かす</h3>
 
@@ -20,6 +48,9 @@
 <p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
 <sub>ボクセルの塔の庭園。1回のプロンプトで生成し、RTX 5070 上の Strata で動かしています（IQ3_S、128K コンテキスト） ·
 <a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">動画全体（49秒）</a></sub></p>
+
+このフォークでは、明示的に有効化して使う実験的な **DeepSeek V4.1 Flash1017** アドオンも、Linux の CPU または NVIDIA 向けの独立した手順で提供しています（[英語ガイド](tools/v41/README.md)）。既存の Strata インストーラーと Qwen のデフォルト設定は変更されません。
+独立した CUDA エンジンは、デフォルトで認識可能なすべての GPU を使用します（`--expert-gpus auto`）。マルチ GPU の対応範囲とプロファイリング結果はガイドを参照してください。
 
 Strata は **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** を動かします。1250億パラメータのモデルで、
 ふつうはサーバーが必要ですが、Strata なら一般的なPCで使えます。チャット、コード作成、画像の読み取りができ、

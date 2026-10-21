@@ -10,6 +10,22 @@ makers' compressions). It also runs a smaller model, [Qwen3.6-35B-A3B](#qwen36-3
 > [Will it fit?](#will-it-fit) · [The versions](#the-versions) · [Qwen3.6](#qwen36-35b-a3b) ·
 > [Adding another model](#adding-or-switching-models)
 
+## DeepSeek V4.1 Flash 1017 (experimental, separate engine)
+
+The opt-in [DeepSeek V4.1 port](../tools/v41/README.md) lives in `tools/v41/`, separate from the Qwen engine.
+It runs on Linux x86-64 with CPU or NVIDIA CUDA. DS41 CUDA generation and the isolated server default
+to all visible GPUs (`--expert-gpus auto`); `--expert-gpus 0` retains the single-GPU path. Vision is unsupported.
+`setup.py` has no DeepSeek family: the Qwen choices and defaults below are unchanged.
+
+Its documented input is [mrfakename/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF),
+Q2_K in **10 shards, about 247 GiB** total. Use the matching `config.json` and tokenizer from
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017);
+the original raw safetensors are not direct engine input. Keep all GGUF shards together.
+The Qwen RAM, VRAM, download and speed figures on this page do not apply to DeepSeek.
+Short Q2_K checkpoint generation and HTTP streaming smoke tests passed on one Quadro RTX 8000.
+See the port guide and its benchmark report for subsequent four-GPU profiling and exact support limits.
+The original smoke checks are not model-quality or throughput benchmarks.
+
 ## Pick by memory
 
 The tiers count RAM and VRAM (the graphics card's memory) together, the same as the [README](../README.md#the-other-sizes).

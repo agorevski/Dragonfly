@@ -313,6 +313,7 @@ struct SpecStash {
 
 /// All the device state, so the CPU-only flavour has none of it to leak.
 struct Gpu {
+    int device = 0;
     Arena arena;
     std::unique_ptr<SpecStash> spec;   ///< spec_read's stash (opened on first use)
     std::unique_ptr<ReadPool> rpool;   ///< D3's file-tier readers (persistent; created on first use)
@@ -325,6 +326,7 @@ struct Gpu {
     uint8_t* h_fstage = nullptr;       ///< run(): file-tier misses read here (pinned), then DMA'd (kMaxParts blobs)
     void *d_x = nullptr, *d_xq = nullptr, *d_parts = nullptr, *d_grp_ptr = nullptr, *d_grp_start = nullptr,
          *d_ngroups = nullptr, *d_ent_dst = nullptr, *d_ent_tok = nullptr, *d_scratch = nullptr, *d_stage = nullptr;
+    void* d_peer_out = nullptr;
     cudaEvent_t ev[4] = {};
     void* d_pf = nullptr;         ///< kMaxPf staging slots, one expert blob each
     cudaStream_t s_pf = nullptr;  ///< the prefetch stream (never the main one: the DMAs run under the dense work)
@@ -416,7 +418,7 @@ struct Gpu {
             if (e) cudaEventDestroy(e);
         for (cudaGraphExec_t g : tier_g)
             if (g) cudaGraphExecDestroy(g);
-        void* bufs[] = {d_x, d_xq, d_parts, d_grp_ptr, d_grp_start, d_ngroups, d_ent_dst, d_ent_tok, d_scratch,
+        void* bufs[] = {d_peer_out, d_x, d_xq, d_parts, d_grp_ptr, d_grp_start, d_ngroups, d_ent_dst, d_ent_tok, d_scratch,
                         d_stage, d_pf, d_meta};
         if (h_meta) cudaFreeHost(h_meta);
         if (h_fstage) cudaFreeHost(h_fstage);
@@ -1332,6 +1334,7 @@ bool Ds41MoeTier::init(const Ds41MoeGeom& geom, Ds41BlobSource* blobs, const Ds4
     return false;
 #else
     Gpu& gp = *(im_->gpu = std::unique_ptr<Gpu>(new Gpu()));
+    ck(cudaGetDevice(&gp.device), "tier device");
     gp.arena.blob = im_->blob;
     gp.arena.n_layers = geom.n_layers;
     gp.arena.n_experts = geom.n_experts;
@@ -2141,12 +2144,18 @@ int32_t arena_victim(Ds41MoeImpl& im, int64_t layer, uint64_t need, const int32_
 }
 
 bool gpu_run(Ds41MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w6, const float* x_host,
-             const void* x_dev, float* out, void* out_dev = nullptr) {
+             const void* x_dev, float* out, void* out_dev = nullptr, int input_device = -1, int output_device = -1) {
     static const bool prof = std::getenv("DS4_TIER_PROF") != nullptr;
     double tp = prof ? now_ms() : 0;
     auto mark = [&](int i) { if (prof) { const double t = now_ms(); g_prof[i] += t - tp; tp = t; } };
     Gpu& gp = *im.gpu;
     const int64_t H = im.g.n_embd;
+    void* peer_out = nullptr;
+    if (out_dev && output_device >= 0 && output_device != gp.device) {
+        if (!gp.d_peer_out) ck(cudaMalloc(&gp.d_peer_out, (size_t) H * sizeof(float)), "peer output");
+        peer_out = out_dev;
+        out_dev = gp.d_peer_out;
+    }
     const int64_t K = im.g.top_k;
     const int64_t B = im.blob;                        // staging STRIDE (the largest blob)
     auto BLX = [&](int32_t e) { return im.bl[(size_t) im.g.cls(layer, e)]; };   // an expert's blob (the bytes a DMA moves)
@@ -2252,6 +2261,12 @@ bool gpu_run(Ds41MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w
     // bit.  STRATA_X_HOST=1 = always through the host (the old path).
     static const bool x_host_always = std::getenv("STRATA_X_HOST") || std::getenv("DS41_CHECK_POOL_BATCH") ||
                                       std::getenv("DS4_CHECK_GPU");
+    if (x_dev && input_device >= 0 && input_device != gp.device) {
+        // The producer has completed before entry. Copy and quantization share a stream; neither default-stream
+        // ordering nor peer-memory kernel access is needed (also works across non-NVLink device pairs).
+        ck(cudaMemcpyPeerAsync(gp.d_x, gp.device, x_dev, input_device, (size_t) H * sizeof(float), gp.s), "x peer");
+        x_dev = gp.d_x;
+    }
     if (x_dev && nk == 0 && !x_host_always) {
         strata::kernels::native_quantize_q8_1((const float*) x_dev, gp.d_xq, (int) H, 1, gp.s);
         ++st.device_activation_calls;
@@ -2800,6 +2815,9 @@ bool gpu_run(Ds41MoeImpl& im, int64_t layer, const int32_t* ids6, const float* w
                            gp.s), "sum weights");
         strata::kernels::decode_rows_sum((const float*) gp.d_parts, (const float*) ((uint8_t*) gp.d_meta + o_w), (int) K, H,
                                          (float*) out_dev, gp.s);
+        if (peer_out)
+            ck(cudaMemcpyPeerAsync(peer_out, output_device, out_dev, gp.device, (size_t) H * sizeof(float), gp.s),
+               "sum peer");
         ck(cudaStreamSynchronize(gp.s), "sum sync");
     } else {
     ck(cudaMemcpyAsync(gp.h_parts, gp.d_parts, (size_t) std::max<int64_t>(kMaxParts, K) * (size_t) H * 4,
@@ -4595,13 +4613,13 @@ bool Ds41MoeTier::run(int64_t layer, const int32_t* ids6, const float* w6, const
 }
 
 bool Ds41MoeTier::run_to_dev(int64_t layer, const int32_t* ids6, const float* w6, const float* x, void* out_dev,
-                           const void* x_dev) {
+                           const void* x_dev, int input_device, int output_device) {
     if (!im_->inited || !im_->pool) return false;
     if (!ids6 || !w6 || (!x && !x_dev) || !out_dev) return false;
     rebal_count(*im_, layer, ids6, im_->g.top_k);
     if (!im_->g.routed(layer) || im_->cfg.cpu_only) return false;
 #if defined(DS4_MOE_CUDA)
-    return gpu_run(*im_, layer, ids6, w6, x, x_dev, nullptr, out_dev);
+    return gpu_run(*im_, layer, ids6, w6, x, x_dev, nullptr, out_dev, input_device, output_device);
 #else
     return false;
 #endif
