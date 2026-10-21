@@ -5,10 +5,12 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
 import struct
 import subprocess
+import threading
 
 
 def string(value):
@@ -183,6 +185,87 @@ def main():
             raise AssertionError(result.stdout + result.stderr)
         if len(result.stdout.split()) != 2:
             raise AssertionError("Expected two generated token IDs: " + result.stdout + result.stderr)
+        profile_directory = directory / "route-calibration"
+        profile_directory.mkdir()
+        profile_model, profile_config, _ = fixture(profile_directory, nonzero=True)
+        profile_command = command.copy()
+        profile_command[profile_command.index("-m") + 1] = str(profile_model)
+        profile_env = dict(env, STRATA_V41_CONFIG=str(profile_config))
+        baseline_logits = directory / "profile-baseline.f32"
+        observed_logits = directory / "profile-observed.f32"
+        baseline = subprocess.run(profile_command + ["--dump-last", str(baseline_logits)],
+                                  env=profile_env, text=True, capture_output=True, timeout=60)
+        profile_path = directory / "routes.profile"
+        profiled = subprocess.run(profile_command + ["--route-profile", str(profile_path),
+                                                    "--dump-last", str(observed_logits)], env=profile_env,
+                                  text=True, capture_output=True, timeout=60)
+        if (baseline.returncode or profiled.returncode or profiled.stdout != baseline.stdout or
+                observed_logits.read_bytes() != baseline_logits.read_bytes()):
+            raise AssertionError("Route profiling changed tokens: " + profiled.stdout + profiled.stderr)
+        values = struct.unpack("<4f", baseline_logits.read_bytes())
+        if not all(math.isfinite(v) for v in values) or not any(values):
+            raise AssertionError("Route profiling fixture must produce finite nonzero logits")
+        rows = [line.split() for line in profile_path.read_text().splitlines() if line.startswith("count ")]
+        expected_decode = 2 * (len(profiled.stdout.split()) - 1)
+        if (len(rows) != 4 or sum(int(row[3]) for row in rows) != 6 or
+                sum(int(row[4]) for row in rows) != expected_decode):
+            raise AssertionError("Route profiling must distinguish three prompt tokens and one decode step per layer")
+        served = subprocess.run(
+            profile_command + ["--serve", "--no-prefix-cache", "--route-profile", str(profile_path)],
+            input="GEN 2 0,2,3\nGEN 2 0,2,3\nQUIT\n", env=profile_env,
+            text=True, capture_output=True, timeout=60)
+        if served.returncode or served.stdout.count("DONE ") != 2:
+            raise AssertionError("Profile serve requests failed: " + served.stdout + served.stderr)
+        rows = [line.split() for line in profile_path.read_text().splitlines() if line.startswith("count ")]
+        generated = [int(line.split()[1]) for line in served.stdout.splitlines() if line.startswith("DONE ")]
+        if (sum(int(row[3]) for row in rows) != 12 or
+                sum(int(row[4]) for row in rows) != 2 * sum(n - 1 for n in generated)):
+            raise AssertionError("Profile must accumulate prompt/decode counts across serve requests")
+        with (directory / "profile-live.stderr").open("w") as stderr:
+            live = subprocess.Popen(
+                profile_command + ["--serve", "--no-prefix-cache", "--route-profile", str(profile_path)],
+                env=profile_env, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr)
+            output = queue.Queue()
+            def read_live():
+                for line in live.stdout:
+                    output.put(line)
+                output.put(None)
+            reader = threading.Thread(target=read_live, daemon=True)
+            reader.start()
+            try:
+                for request in (1, 2):
+                    live.stdin.write("GEN 2 0,2,3\n")
+                    live.stdin.flush()
+                    while True:
+                        line = output.get(timeout=60)
+                        if line is None:
+                            raise AssertionError("Live profile server exited before DONE")
+                        if line.startswith("DONE "):
+                            break
+                    live_rows = [line.split() for line in profile_path.read_text().splitlines()
+                                 if line.startswith("count ")]
+                    if sum(int(row[3]) for row in live_rows) != request * 6:
+                        raise AssertionError("Cumulative profile must be available before DONE, without QUIT")
+                live.stdin.write("QUIT\n")
+                live.stdin.flush()
+                if live.wait(timeout=60):
+                    raise AssertionError("Live profile server failed on QUIT")
+            finally:
+                if live.poll() is None:
+                    live.kill()
+                    live.wait(timeout=60)
+                live.stdin.close()
+                reader.join(timeout=60)
+                live.stdout.close()
+        seed = directory / "selected.seed"
+        metadata = "".join(line + "\n" for line in profile_path.read_text().splitlines()[1:]
+                           if not line.startswith("count "))
+        seed.write_text("DS41_SEED_V1\n" + metadata + "select 0 0\n")
+        rejected = subprocess.run(profile_command + ["--cache-seed", str(seed)], env=profile_env,
+                                  text=True, capture_output=True, timeout=60)
+        if rejected.returncode == 0 or "requires persistent multi-GPU" not in rejected.stderr:
+            raise AssertionError("Exact seed must reject nonpersistent single-device execution")
+        print("Route profiling: exact generated tokens, separate prefill/decode counts, seed mode guard passed")
         fallback = subprocess.run(
             command, env=dict(env, STRATA_DEVICE_ACTIVATIONS="1"), text=True, capture_output=True, timeout=60,
         )
@@ -302,7 +385,7 @@ def main():
         for extra, message in (
             (["--chunk-mmq"], "--chunk-mmq is unavailable"),
             (["--chunk-batch"], "--chunk-batch requires --experts gpu"),
-            (["--expert-gpus", "0,1"], "unknown argument --expert-gpus"),
+            (["--expert-gpus", "0,1"], "--expert-gpus requires CUDA GPU experts"),
             (["--experts", "invalid"], "--experts must be cpu|gpu"),
         ):
             result = subprocess.run(command + extra, env=env, text=True, capture_output=True, timeout=60)

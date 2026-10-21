@@ -10,7 +10,7 @@ Example:
 The IDs file is a JSON array of token IDs. Use the same file across comparisons.
 --repeats 2 measures process-cold then process-warm full prefill; prefix reuse is
 disabled. OS page-cache warmth is uncontrolled: this is NOT a cold-disk test.
-Each invocation loads exactly one model, on physical GPU0. Logs, token IDs,
+Each invocation loads exactly one model, on explicitly selected GPUs (default 0). Logs, token IDs,
 hardware, actual engine diagnostics and the exact command accompany result.json.
 No retries or smaller-configuration fallbacks occur on failure.
 """
@@ -107,6 +107,7 @@ def command(args):
             "--no-enc-skip", "--no-prefix-cache", "--vram-lru"]
     if args.chunk_batch:
         argv.append("--chunk-batch")
+    argv += ["--expert-gpus", args.expert_gpus]
     return argv
 
 
@@ -114,11 +115,12 @@ def run_protocol(args, ids, result):
     events = queue.Queue()
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("STRATA_", "DS41_", "GGML_"))}
-    env["CUDA_VISIBLE_DEVICES"] = "0"
+    env["CUDA_VISIBLE_DEVICES"] = args.gpus
     env["STRATA_V41_CONFIG"] = str(args.config)
     if args.step_max is not None:
         env["STRATA_SERVE_STEP_MAX"] = str(args.step_max)
     switches = {
+        "STRATA_DS41_BATCH_FUSED_GU": args.fused_gu,
         "STRATA_DEVICE_ACTIVATIONS": args.device_activations,
         "STRATA_TIER_GRAPH": args.tier_graph,
         "STRATA_DMA_OVERLAP": args.dma_overlap,
@@ -127,7 +129,7 @@ def run_protocol(args, ids, result):
     for name, enabled in switches.items():
         if enabled:
             env[name] = "1"
-    result["environment"] = {"CUDA_VISIBLE_DEVICES": "0",
+    result["environment"] = {"CUDA_VISIBLE_DEVICES": args.gpus,
                              "STRATA_V41_CONFIG": str(args.config),
                              "STRATA_SERVE_STEP_MAX": env.get("STRATA_SERVE_STEP_MAX"),
                              **{name: env.get(name) for name in switches},
@@ -260,6 +262,8 @@ def main():
     parser.add_argument("--ids-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="new artifact directory")
     parser.add_argument("--slots", default="512")
+    parser.add_argument("--gpus", default="0", help="reserved physical CUDA GPU ordinals, e.g. 0,1,2,3")
+    parser.add_argument("--expert-gpus", default="auto", help="expert device selection within --gpus")
     parser.add_argument("--arena-gib", type=float, default=16)
     parser.add_argument("--vram-margin", type=float, default=2)
     parser.add_argument("--pcie", type=float, default=1)
@@ -269,6 +273,8 @@ def main():
     parser.add_argument("--step-max", type=int,
                         help="explicit short-turn pass cutoff; 0 forces layer-major prefill")
     parser.add_argument("--chunk-batch", action="store_true", help="opt in to four-column expert kernels")
+    parser.add_argument("--fused-gu", action="store_true",
+                        help="opt in to fused gate/up activation and quantization; requires --chunk-batch")
     parser.add_argument("--device-activations", action="store_true", help="opt in to device decode inputs")
     parser.add_argument("--tier-graph", action="store_true", help="opt in to expert-tier graph capture")
     parser.add_argument("--dma-overlap", action="store_true", help="opt in to expert demand-copy overlap")
@@ -282,6 +288,11 @@ def main():
     parser.add_argument("--timeout", type=float, default=600, help="whole process deadline, seconds")
     parser.add_argument("--min-available-gib", type=float, default=40)
     args = parser.parse_args()
+    if args.fused_gu and not args.chunk_batch:
+        parser.error("--fused-gu requires --chunk-batch")
+    gpu_ids = args.gpus.split(",")
+    if any(not item.isdigit() for item in gpu_ids) or len(set(map(int, gpu_ids))) != len(gpu_ids):
+        parser.error("--gpus must list distinct nonnegative physical GPU ordinals")
     if (not 0 < args.arena_gib <= 96
             or not math.isfinite(args.min_available_gib) or args.min_available_gib < 40):
         parser.error("arena must be (0,96] GiB and MemAvailable floor >=40 GiB")
@@ -324,9 +335,13 @@ def main():
         result["gpu_hardware"] = capture(["nvidia-smi", "--query-gpu=index,uuid,name,driver_version,memory.total,pci.bus_id", "--format=csv"])
         result["cpu_hardware"] = capture(["lscpu"])
         result["gpu_processes_before"] = capture(["nvidia-smi", "--query-compute-apps=gpu_uuid,pid,process_name,used_memory", "--format=csv,noheader"])
-        gpu0 = result["gpu_hardware"].splitlines()[1].split(",")[1].strip()
-        if any(gpu0 in line for line in result["gpu_processes_before"].splitlines()):
-            raise RuntimeError("GPU0 already occupied; refusing checkpoint load")
+        hardware = {fields[0].strip(): fields[1].strip() for fields in
+                    (line.split(",") for line in result["gpu_hardware"].splitlines()[1:])}
+        for ordinal in gpu_ids:
+            if str(int(ordinal)) not in hardware:
+                raise RuntimeError(f"GPU{ordinal} is not available")
+            if any(hardware[str(int(ordinal))] in line for line in result["gpu_processes_before"].splitlines()):
+                raise RuntimeError(f"GPU{ordinal} already occupied; refusing checkpoint load")
         if available_gib() <= args.min_available_gib:
             raise RuntimeError("insufficient MemAvailable before launch")
         run_protocol(args, ids, result)

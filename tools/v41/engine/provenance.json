@@ -5,6 +5,13 @@
   "import_note": "Imported from the read-only working tree, including uncommitted standard-1017 geometry/dense/Engram/MoE/generate correctness changes. Source SHA256 values identify imported bytes before port adjustments.",
   "ggml_commit": "3cf03257f219afbe7334045ff7c6a06ac68c627d",
   "ggml_archive_sha256": "c076d7534afa0e5d0ec2a0d425b11e791c16f3de0d727221aea071cef156a280",
+  "multi_gpu_followup": {
+    "source": "tools/v41/engine/ds41_mgpu.{cpp,hpp} in the same read-only Xolotl working tree",
+    "source_cpp_sha256": "e5ae88b7bf0436d35e53a2aef37df0731845ac68cb45f45a73d78828c8d88896",
+    "source_hpp_sha256": "240e5444b9230bc98635b5b4f8565b383ba14489624efaa066facac687ded466",
+    "destination": "tools/v41/engine/ds41_runner.{cpp,hpp}",
+    "adjustments": "Adapt the layer-sharded production runner separately from the earlier all-resident prototype. Add strict selection parsing, global pinned-tail budgeting, aligned cache sizing, preflight/coverage checks, device-input staging and default auto CUDA-device selection. Reject unsupported pruning/speculation explicitly; retain CPU and explicit single-GPU paths."
+  },
   "port_adjustments": [
     "All fork headers, CPU pool/native/PTQ kernels, CUDA IQ/MMVQ fork helpers and elastic cache remain private; do not link their same-named but different-ABI symbols with upstream Strata engine libraries.",
     "Compile unchanged upstream CPU IQ and platform helpers again with private headers; finite-clamp IQ gate/up uses stock ggml dot products instead of requiring modified upstream IQ kernel APIs.",

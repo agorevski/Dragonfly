@@ -14,7 +14,9 @@ Work through the steps in order. Tell the user what you are doing in plain words
 > **If the user explicitly requests DeepSeek V4.1 Flash 1017:** use
 > [tools/v41/README.md](../tools/v41/README.md) instead of the Qwen setup steps below.
 > This is a standalone, opt-in engine and isolated serving adapter, experimental on Linux x86-64 with CPU
-> or one NVIDIA CUDA GPU only (no vision or multi-GPU serving). `setup.py` has no DeepSeek family;
+> or NVIDIA CUDA (no vision). DS41 CUDA defaults to all visible GPUs (`--expert-gpus auto`);
+> use `--expert-gpus 0` for a single card. Reserve every selected card and enough RAM for the pinned
+> nonresident tail; follow the port's multi-GPU guide and profiling report. `setup.py` has no DeepSeek family;
 > do not pass DeepSeek through normal setup or launch it with `serve/server.py`.
 > The input is the 10-shard Q2_K GGUF (~247 GiB) from
 > [mrfakename/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF),

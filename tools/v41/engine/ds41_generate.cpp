@@ -24,6 +24,7 @@
 // Launch text requests through tools/v41/serve/launch.py; see tools/v41/README.md for memory settings.
 #include "ds41_dense.hpp"
 #include "ds41_moe.hpp"
+#include "ds41_runner.hpp"
 #if defined(DS41_HAVE_DSPARK)
 #include "ds41_dspark.hpp"
 #endif
@@ -33,6 +34,7 @@
 #include "ggml-cpu.h"
 #if defined(DS41_HAVE_CUDA)
 #include "ggml-cuda.h"
+#include <cuda_runtime.h>
 #endif
 
 #include <algorithm>
@@ -44,6 +46,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <iostream>
@@ -61,6 +64,7 @@ namespace {
 
 struct Args {
     std::string model, ids_csv, ids_file, rank, dump_logits, dump_last;
+    std::string route_profile, cache_seed;
     std::string build_mirror;      // --build-mirror F [--mirror-gib N]: write the blob mirror (coldest experts by --rank) and exit
     double mirror_gib = 85.0;
     std::string prune;            // --prune F: "layer expert" lines (coldest first - v41_prune_list.py), soft or hard pruned
@@ -72,6 +76,8 @@ struct Args {
     float route_bias = 1.0f;      // --route-bias X: selection bonus +X on the experts resident in VRAM at the seed (DEFAULT 1.0, Mal 2026-10-11:
                                   // ~4x decode; 4096-tok ppl code 2.38 -> 2.67, agentic 15.1 -> 6.9; --route-bias 0 = exact routing)
     std::vector<std::string> engram;
+    std::string expert_gpus = "auto";
+    bool pcie_set = false, pf_set = false;
     int n_predict = 64;
     std::string backend = "cuda", experts = "gpu";
     int64_t slots = 0;            // 0 = auto (free VRAM after the dense half, minus --vram-margin)
@@ -106,11 +112,20 @@ bool parse(int argc, char ** argv, Args & a) {
         if (k == "-m" || k == "--model") a.model = next();
         else if (k == "--ids") a.ids_csv = next();
         else if (k == "--ids-file") a.ids_file = next();
+        else if (k == "--route-profile") {
+            a.route_profile = next();
+            if (a.route_profile.empty()) return false;
+        }
+        else if (k == "--cache-seed") {
+            a.cache_seed = next();
+            if (a.cache_seed.empty()) return false;
+        }
         else if (k == "-n" || k == "--n-predict") a.n_predict = std::atoi(next().c_str());
         else if (k == "--backend") a.backend = next();
         else if (k == "--experts") a.experts = next();
         else if (k == "--engram") { std::stringstream ss(next()); std::string d; while (std::getline(ss, d, ':')) a.engram.push_back(d); }
         else if (k == "--slots") { const std::string v = next(); a.slots = v == "auto" ? 0 : std::atoll(v.c_str()); }
+        else if (k == "--expert-gpus") a.expert_gpus = next();
         else if (k == "--vram-margin") a.vram_margin_gib = std::atof(next().c_str());
         else if (k == "--arena-gib") a.arena_gib = std::atof(next().c_str());
         else if (k == "--rank") a.rank = next();
@@ -120,8 +135,8 @@ bool parse(int argc, char ** argv, Args & a) {
         else if (k == "--vram-lru") a.vram_lru = true;
         else if (k == "--no-vram-lru") a.vram_lru = false;
         else if (k == "--arena-adapt") a.arena_adapt = true;
-        else if (k == "--pcie") a.pcie = std::atof(next().c_str());
-        else if (k == "--pf-b") a.pf_b = std::atof(next().c_str());
+        else if (k == "--pcie") { a.pcie = std::atof(next().c_str()); a.pcie_set = true; }
+        else if (k == "--pf-b") { a.pf_b = std::atof(next().c_str()); a.pf_set = true; }
         else if (k == "--prefill-chunk") a.prefill_chunk = std::atoi(next().c_str());
         else if (k == "--prompt-batch") a.prompt_batch = std::atoi(next().c_str());
         else if (k == "--chunk-mmq") {
@@ -164,6 +179,14 @@ bool parse(int argc, char ** argv, Args & a) {
     }
     if (a.chunk_batch && a.experts != "gpu") {
         std::fprintf(stderr, "ds41_generate: --chunk-batch requires --experts gpu\n");
+        return false;
+    }
+    if (!a.cache_seed.empty() && !a.rank.empty()) {
+        std::fprintf(stderr, "ds41_generate: --cache-seed and --rank are mutually exclusive\n");
+        return false;
+    }
+    if ((a.backend == "cpu" || a.experts == "cpu") && a.expert_gpus != "auto") {
+        std::fprintf(stderr, "ds41_generate: --expert-gpus requires CUDA GPU experts\n");
         return false;
     }
     return !a.model.empty() && (a.serve || !a.ids_csv.empty() || !a.ids_file.empty() || !a.build_mirror.empty());
@@ -403,18 +426,56 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "VRAM: %.2f GiB free after the dense half -> %.2f GiB of expert slots (margin %.2f)\n",
                      fr / 1073741824.0, slot_gib, a.vram_margin_gib);
     }
-    Ds41MoeTier tier;
+    std::vector<int> expert_devices;
+#if defined(DS41_HAVE_CUDA)
+    if (a.experts == "gpu" && !ggml_backend_is_cpu(be)) {
+        int visible = 0;
+        const auto status = cudaGetDeviceCount(&visible);
+        if (status != cudaSuccess || !ds41_expert_devices(a.expert_gpus, visible, expert_devices, err)) {
+            std::fprintf(stderr, "ds41_generate: GPU selection: %s\n",
+                         status != cudaSuccess ? cudaGetErrorString(status) : err.c_str());
+            return 2;
+        }
+        if (a.expert_gpus == "auto" && expert_devices.size() > size_t(TG.n_layers))
+            expert_devices.resize(size_t(TG.n_layers));
+        if (expert_devices.size() == 1) {
+            if (expert_devices[0] != 0) {
+                std::fprintf(stderr, "ds41_generate: single-GPU mode uses CUDA-visible 0; select the physical card with CUDA_VISIBLE_DEVICES\n");
+                return 2;
+            }
+            expert_devices.clear();
+        }
+    }
+#else
+    if (a.expert_gpus != "auto") {
+        std::fprintf(stderr, "ds41_generate: --expert-gpus requires a CUDA build\n");
+        return 2;
+    }
+#endif
+    const bool multi_gpu = expert_devices.size() > 1;
+    if (multi_gpu) {
+        if (!a.pcie_set) a.pcie = 1;
+        if (!a.pf_set) a.pf_b = 0;
+        if (std::getenv("STRATA_DSPARK") || std::getenv("STRATA_SERVE_DSPARK")) {
+            std::fprintf(stderr, "ds41_generate: multi-GPU DSpark is not validated; use --expert-gpus 0 for speculation\n");
+            return 2;
+        }
+        std::fprintf(stderr, "multi-GPU: %zu expert-layer devices, dense/KV on CUDA0; persistent caches and pinned tail\n",
+                     expert_devices.size());
+    }
+    Ds41MoeRunner tier;
     Ds41MoeConfig mc;
     mc.cpu_only = a.experts == "cpu" || ggml_backend_is_cpu(be);
     mc.slots = a.slots > 0 ? a.slots : TG.n_layers * TG.n_experts;
     mc.slot_gib = a.slots > 0 ? 0.0 : slot_gib;
     mc.no_cache = a.slots <= 0 && slot_gib <= 0;
-    mc.defer_cache = !mc.cpu_only && (a.prefill_chunk > 1 || a.prompt_batch > 1);
+    mc.defer_cache = !multi_gpu && !mc.cpu_only && (a.prefill_chunk > 1 || a.prompt_batch > 1);
     mc.pcie_frac = a.pcie;
     mc.pf_b = a.pf_b;   // predicted prefetch (Ds41Dense::predict -> tier.prefetch), experts per layer
     mc.threads = a.threads;
     mc.arena_gib = a.arena_gib;
     mc.max_arena_gib = a.arena_gib;
+    if (multi_gpu) mc.mem_floor_gib = 40;
     mc.vram_lru = a.vram_lru;
     mc.arena_adapt = a.arena_adapt;
     mc.chunk_mmq = a.chunk_mmq;
@@ -443,7 +504,30 @@ int main(int argc, char ** argv) {
                      a.prune_penalty > 0 ? ("penalised -" + std::to_string(a.prune_penalty)).c_str() : "masked out of routing", a.prune.c_str());
         mc.exclude = pruned;
     }
-    if (!tier.init(TG, source.get(), mc, err)) { std::fprintf(stderr, "ds41_generate: tier init: %s\n", err.c_str()); return 1; }
+    std::vector<std::pair<int32_t,int32_t>> selected;
+    if (!a.route_profile.empty() || !a.cache_seed.empty()) {
+        try {
+            tier.route_profile.configure(TG, a.model, expert_devices);
+            if (!a.cache_seed.empty()) selected = tier.route_profile.read_seed(a.cache_seed);
+            if (!a.route_profile.empty()) {
+                for (const auto & input : {a.model, a.cache_seed, a.ids_file, a.rank})
+                    if (!input.empty() && std::filesystem::weakly_canonical(a.route_profile) ==
+                                          std::filesystem::weakly_canonical(input))
+                        throw std::runtime_error("route profile: output must not overwrite an input");
+                tier.route_profile_path = a.route_profile;
+                if (!tier.write_route_profile()) return 2;
+            } else {
+                tier.route_profile.prompt.clear();
+                tier.route_profile.decode.clear();
+            }
+        } catch (const std::exception & e) {
+            std::fprintf(stderr, "ds41_generate: %s\n", e.what()); return 2;
+        }
+    }
+    if (!tier.init(TG, source.get(), mc, expert_devices, a.vram_margin_gib, err,
+                   a.cache_seed.empty() ? nullptr : &selected)) {
+        std::fprintf(stderr, "ds41_generate: tier init: %s\n", err.c_str()); return 1;
+    }
     dense.set_oom_hook([&]() { return tier.release_prestage(); });   // a prompt pass that does not fit: prestage gives way
     // defer the VRAM cache: the prompt's chunk + graph buffers (~4 GiB) use that VRAM first, then the cache opens into
     // it (measured) - the old fixed --vram-margin had to cover prefill and starved decode of slots.  --serve does this
@@ -1350,6 +1434,7 @@ int main(int argc, char ** argv) {
                 apply_bias();
             }
             tier.rebalance_begin_prompt();
+            tier.route_profile.prefill = true;
             tier.reset_stats();
             if (const char* rl = std::getenv("STRATA_ROUTE_LOG")) {   // a turn marker for the route log (see ds41_moe.cpp)
                 if (FILE* f = std::fopen(rl, "a")) { std::fprintf(f, "# turn %d new %d %s\n", n_req, dh, by_step ? "passes" : "batch"); std::fclose(f); }
@@ -1382,7 +1467,7 @@ int main(int argc, char ** argv) {
             // state columns + graph are ~0.48 MiB a column, and the card is shared with whatever else the desktop
             // runs.  This is what lets a big --prompt-batch stay OPT-IN: the engine takes what is actually free.
             pb_cap = PB;
-            if (!by_step && dh >= 2 && PB > 1 && !mc.cpu_only) {
+            if (!tier.sharded() && !by_step && dh >= 2 && PB > 1 && !mc.cpu_only) {
                 size_t frb = 0, totb = 0;
                 ggml_backend_dev_memory(ggml_backend_get_device(be), &frb, &totb);
                 // The layer-major batch's own VRAM, CALIBRATED on four traced points (STRATA_VRAM_TRACE=1, s13
@@ -1521,6 +1606,8 @@ int main(int argc, char ** argv) {
                 }
             }
             tail_keep = 0;
+            tier.route_profile.prefill = false;
+            if (!tier.write_route_profile()) return 1;
             if (!ok) {
                 std::printf("ERR prefill failed: %s\n", ferr.c_str());
                 std::fflush(stdout);
@@ -1729,10 +1816,12 @@ int main(int argc, char ** argv) {
                              1.0 + (double) rq_acc / rq_pass, 1.0 + (double) sv_acc / std::max(1L, sv_pass));
 #endif
             tier.rebalance_tick(true);   // the gap until the next request: retire a large batch for the reader
+            if (!tier.write_route_profile()) return 1;
             std::printf("DONE %d %d %.1f %.1f %s 0 0 %d %lld %lld 0 %lld 0 %d\n", gen, total, prompt_ms, dec_ms, finish, reused,
                         (long long) st.hits, (long long) st.lookups(), (long long) st.file_tier, total - reused);
             std::fflush(stdout);
         }
+        if (!tier.write_route_profile()) std::_Exit(1);
         tier.close();
         // the stdin reader thread (detached) sits in getline holding cin's lock: a normal exit's stream teardown waits
         // on it until the client closes the pipe - leave without the static destructors
@@ -1763,6 +1852,7 @@ int main(int argc, char ** argv) {
     const int sp_tail = spec ? std::min<int>(128, (int) prompt.size() - 1) : 0;
     const bool prof_prefill = std::getenv("STRATA_PROFILE_PREFILL") != nullptr;
     if (prof_prefill) Ds41MoeTier::profiler(true);
+    tier.route_profile.prefill = true;
     const bool ok = feed(prompt.data(), (int) prompt.size() - dm_tail - sp_tail, 0, [&](int done) {
         if (!a.quiet) std::fprintf(stderr, "\rprompt %d/%zu", done, prompt.size());
     }, a.ppl || !a.dump_logits.empty() ? &all : nullptr);
@@ -1802,6 +1892,7 @@ int main(int argc, char ** argv) {
         apply_bias();
     }
 #endif
+    tier.route_profile.prefill = false;
     const double prompt_ms = now_ms() - tp0;
     if (defer_vram && dm_tail == 0 && !spec) {   // the prompt is done: its buffers go back, the VRAM expert cache opens into the free space
         if (!open_cache()) { std::fprintf(stderr, "ds41_generate: deferred seed: %s\n", err.c_str()); return 1; }
@@ -2024,5 +2115,5 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "\n");
     }
     tier.close();
-    return 0;
+    return tier.write_route_profile() ? 0 : 1;
 }

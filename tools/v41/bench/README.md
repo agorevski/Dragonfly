@@ -2,9 +2,11 @@
 
 `benchmark.py` drives the existing `ds41_generate --serve` token protocol directly.
 It does not modify the engine or the default server path and needs no downloads.
-Only physical GPU0 is visible. Reserve the GPU and the full-checkpoint host RAM
+Only physical GPU0 is visible by default. Use `--gpus 0,1,2,3` for the supported
+four-GPU path; the engine defaults to `--expert-gpus auto` within that mask.
+Reserve every selected GPU and the full-checkpoint host RAM
 before starting; do not run multiple instances concurrently.
-The first five bounded local runs and their limitations are in [RESULTS.md](RESULTS.md).
+The bounded single- and multi-GPU runs and their limitations are in [RESULTS.md](RESULTS.md).
 
 ```sh
 python -m unittest discover -s tools/v41/bench -p 'test_*.py' -v
@@ -32,6 +34,8 @@ Suggested finite matrix, keeping all other flags identical:
 4. Prefill geometry: the same 128 IDs and control flags plus
    `--prompt-batch 64 --chunk 32`.
 5. CPU/PCIe axis: 64 IDs, residency flags plus `--pcie 0` (same thread count).
+6. Multi-GPU: residency flags plus `--gpus 0,1,2,3 --expert-gpus auto`.
+   Keep `--pcie 1 --pf-b 0`; the pinned tail must fit the total arena budget.
 
 For the integrated roadmap engine, compare each opt-in separately against the
 same binary and input: `--device-activations`, `--chunk-batch` (with
@@ -40,6 +44,19 @@ be compared with eager ggml execution using `--disable-cuda-graphs`; this does
 not disable the independent expert-tier graph switch. Record build-time CUDA
 graph settings with the engine revision. All harness switches default off,
 and inherited switch values are removed before explicit settings are applied.
+`--fused-gu` explicitly enables the experimental fused gate/up activation
+and quantization kernel and requires `--chunk-batch`; it is otherwise off.
+
+The measured four-card prefill follow-up reached 90.570 tok/s warm with
+512 input tokens using `--prompt-batch 128 --chunk 64 --chunk-batch --step-max 0`,
+versus 65.148 with batch 32 / chunk 16. These are short same-machine samples,
+not a new default or a long-context recommendation. See the
+[full prefill results](RESULTS.md#further-four-gpu-prefill-measurements).
+
+For expert-cache sizing rather than throughput sweeps, use the separate
+[residency utility](../README.md#calibrating-a-smaller-persistent-expert-cache).
+Collect independent calibration/held-out profiles before reducing the cache;
+99% calibration coverage alone did not retain 99% held-out coverage locally.
 
 The engine normally uses its short-turn passes through 768 new tokens, so
 changing prompt batch alone at 64/128 tokens does not exercise layer-major

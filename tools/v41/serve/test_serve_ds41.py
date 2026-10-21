@@ -64,7 +64,7 @@ def request(port, path, data=None, key=None):
 
 
 @contextmanager
-def server(path, scripts, real_engine=False):
+def server(path, scripts, real_engine=False, backend="cpu"):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -74,7 +74,7 @@ def server(path, scripts, real_engine=False):
     if real_engine:
         command = [sys.executable, str(L.HERE / "launch.py"), "--engine", str(path / "mock-engine"),
                    "--model", str(path / "model.gguf"), "--config", str(path / "config.json"),
-                   "--tokenizer", str(path / "export"), "--backend", "cpu",
+                   "--tokenizer", str(path / "export"), "--backend", backend,
                    "--port", str(port), "--api-key", "test-key",
                    "--write-config", str(path / "server.json")]
     else:
@@ -218,9 +218,16 @@ class LaunchTests(unittest.TestCase):
             model = path / "model with spaces.gguf"
             model.write_bytes(b"GGUF")
             args = argparse.Namespace(engine=sys.executable, model=str(model), config=str(path / "config.json"),
-                                      tokenizer=str(path / "export"), context=4096, backend="cuda",
+                                      tokenizer=str(path / "export"), context=4096, backend="cuda", expert_gpus="auto",
                                       engram=[], engine_arg=[], model_name="test", host="127.0.0.1")
             cfg = L.make_config(args)
+            self.assertEqual(cfg["args"][cfg["args"].index("--expert-gpus") + 1], "auto")
+            args.expert_gpus = "0"
+            self.assertEqual(L.make_config(args)["args"][-1], "0")
+            args.backend = "cpu"
+            with self.assertRaisesRegex(ValueError, "--expert-gpus requires"):
+                L.make_config(args)
+            args.backend, args.expert_gpus = "cuda", "auto"
             self.assertEqual(cfg["env"]["STRATA_V41_CONFIG"], str(path / "config.json"))
             self.assertNotIn("--engram", cfg["args"])
             self.assertNotIn("STRATA_SERVE_DSPARK", cfg["env"])
@@ -330,10 +337,10 @@ class LaunchTests(unittest.TestCase):
             model = path / "model.gguf"
             model.write_bytes(b"GGUF")
             args = argparse.Namespace(engine=str(engine), model=str(model), config=str(path / "config.json"),
-                                      tokenizer=str(path / "export"), context=4096, backend="cpu",
+                                      tokenizer=str(path / "export"), context=4096, backend="cpu", expert_gpus="auto",
                                       engram=[], engine_arg=[], model_name="test", host="127.0.0.1")
             (path / "server.json").write_text(json.dumps(L.make_config(args)))
-            with server(path, [], real_engine=True) as port:
+            with server(path, [], real_engine=True, backend="cuda") as port:
                 with request(port, "/v1/chat/completions",
                              {"messages": [{"role": "user", "content": "hi"},
                                            {"role": "assistant", "content": "previous"},

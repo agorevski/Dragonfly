@@ -51,7 +51,7 @@ build uses `-DSTRATA_DS41_CUDA=OFF`. The build fetches a pinned llama.cpp
 source archive for ggml, not model weights. To use an existing compatible
 llama.cpp checkout instead, pass
 `-DSTRATA_DS41_GGML_DIR=/path/to/llama.cpp`.
-Set `CMAKE_BUILD_PARALLEL_LEVEL=2` when building to bound the separate stock
+Set `STRATA_DS41_CUDA_BUILD_JOBS=2` when configuring to bound the separate stock
 CUDA backend build as well as using `--parallel 2` for the add-on targets.
 
 The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
@@ -60,14 +60,190 @@ The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
 the normal Strata engine's backend settings.
 
 The engine's default `--slots auto` sizes uniform Q2_K/Q3_K expert caches
-against the free-VRAM budget, including slot alignment. With batched
+against the free-VRAM budget, including slot alignment. On the single-GPU path, with batched
 prefill, allocation is deferred until the prompt buffers are released.
 If the automatic budget has no room, decode uses the RAM/file tiers
 without a VRAM expert cache. An explicit `--slots N` remains a manual
 capacity choice; it must fit the available VRAM.
 
+## Supported multi-GPU generation and serving
+
+**DS41 CUDA defaults to `--expert-gpus auto`: all CUDA-visible GPUs.** The
+launcher uses the same default. One visible card uses the original single-GPU
+tier. To keep that path on a multi-GPU machine, pass `--expert-gpus 0`; to
+choose physical cards, set `CUDA_VISIBLE_DEVICES` before launch. IDs in
+`--expert-gpus 0,1,2,3` refer to that visible list, not physical ordinals.
+The separate Strata/Qwen installer and its defaults are unchanged.
+
+This is the production layer-sharded runner adapted from Xolotl, not the
+older all-resident prototype below. Dense attention, Engram and KV stay on
+CUDA0. Contiguous expert-layer ranges execute on their owning GPUs. Each
+owner keeps a persistent VRAM cache and pins only its nonresident experts
+in host RAM. Every expert must fit in that union: initialization reports
+the counts on each card and rejects an uncovered/file-tier tail.
+Small routed outputs are copied back and synchronized before dense uses them.
+This is capacity sharing, not concurrent tensor parallelism.
+
+The standard checkpoint's **Q2_K gate/up plus Q3_K down** is supported.
+Layer formats must be uniform across the model; per-expert mixed formats
+and pruning are rejected. `--arena-gib` caps the **total** pinned tail across
+the selected cards, while an explicit `--slots N` caps each card's cache.
+`--vram-margin` must be at least 1 GiB and reserves prompt/workspace room
+on every selected GPU; start with 2 GiB and a 4096-token context.
+More context or larger prompt batches can require a larger margin.
+The implementation retains a 40 GiB MemAvailable floor while building arenas.
+
+For multi-GPU, omitted PCIe/prediction settings become `--pcie 1 --pf-b 0`;
+incompatible explicit values fail instead of silently selecting a different
+execution mode. Caches stay resident across prefill and repeated requests;
+adaptive eviction, streaming prefetch and CPU expert execution are not used.
+The normal routing-bias defaults are unchanged; use `--route-bias 0
+--route-bias-file 0` for exact-routing comparisons. Real DSpark with multi-GPU
+is not validated and is explicitly rejected. CPU execution remains available
+with `--backend cpu --experts cpu` (or launcher `--backend cpu`).
+
+```sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 python tools/v41/serve/launch.py \
+  --engine build-ds41/ds41_generate \
+  --model /path/to/model-00001-of-00010.gguf \
+  --config /path/to/config.json --tokenizer /path/to/v41-tokenizer \
+  --expert-gpus auto \
+  --engine-arg=--vram-margin --engine-arg=2 \
+  --engine-arg=--arena-gib --engine-arg=64 \
+  --engine-arg=--prompt-batch --engine-arg=32 \
+  --engine-arg=--prefill-chunk --engine-arg=16
+```
+
+Linux x86-64 NVIDIA CUDA is the supported backend for this runner.
+Two- and four-device nonzero synthetic tests cover the mixed-format resident
+and pinned paths, cross-device outputs, independent consumer streams,
+changed inputs and lifecycle. Reserve the cards before running
+`CUDA_VISIBLE_DEVICES=0,1,2,3 build-ds41/test_ds41_runner --cuda`;
+this explicit multi-card test is not run by ordinary CTest.
+Checkpoint timings and Nsight evidence are recorded in the
+[benchmark report](bench/RESULTS.md#supported-four-gpu-runtime-and-profile).
+On the local four-card system, the same-build 128-input / 32-output Q2_K
+comparison measured 56.816 prefill and 21.917 decode tok/s, versus 3.107
+and 0.852 on one card, with identical output IDs and zero runtime file routes.
+Startup increased from 35.3 to 80.2 seconds; these are short local samples,
+not a general throughput guarantee. OpenAI and Anthropic serving also passed
+a real four-card smoke check.
+Other GPU architectures, heterogeneous
+capacity balancing and long-context/concurrent serving are not established
+by the local four-Quadro-RTX-8000 measurements.
+
+## Calibrating a smaller persistent expert cache
+
+This opt-in tool counts **routed expert assignments**, not token hit/miss events.
+It does not change router scores, routing IDs, or expert arithmetic. For an unbiased
+calibration, explicitly disable the existing routing biases and pruning/skipping.
+Use representative prompts and enough generated tokens; prefill-only data is not
+a decode calibration. Keep a separate, independently collected held-out workload.
+
+Add these arguments to an otherwise identical engine command:
+
+```sh
+--route-profile train.routes --route-bias 0 --route-bias-file 0 \
+  --skip-miss 0 --skip-file 0 --no-enc-skip --no-prefix-cache
+```
+
+With `--serve`, counters accumulate across requests, are flushed **before every
+`DONE`**, and are also exported on `QUIT`/EOF. One-shot runs export on exit.
+No prompt text, token IDs, routing weights, or activations are recorded. Abrupt
+termination can lose the current request or interrupt an export; read the file
+after `DONE` or clean shutdown. Counts include routes actually executed, including
+speculative verification/rejected rows and retried work, not merely accepted tokens.
+Prefix reuse and encoder skipping naturally omit work that was not executed.
+The profiler also records the currently resident IDs at export time.
+
+```sh
+python tools/v41/expert_residency.py train.routes other-train.routes \
+  --phase decode --target .99 --held-out held.routes \
+  --output residency.json --seed-output selected.seed
+```
+
+`--phase all` is the default; `prefill` and `decode` stay separate in the input.
+Selection walks descending calibration frequency with deterministic `(layer,
+expert)` ties until the **global** requested assignment coverage is reached.
+The JSON lists exact IDs and per-layer coverage; 99% globally does not mean 99%
+in every layer or on future prompts. This minimizes the number of experts without
+capacity constraints, not the bytes of mixed-format experts. Optional
+`--capacity-bytes 0:BYTES,1:BYTES,...` specifies an expert-only budget for every
+profiled device; experts that cannot fit are skipped and an unattainable target
+fails visibly. Dense weights, KV, scratch, and allocator overhead need separate
+reserves. The runtime independently checks its real free VRAM.
+
+The held-out input never affects selection and must not name a calibration input
+(resolved path aliases are rejected). Its coverage is reported separately;
+**exit code 3** means it missed the requested target (the report/selection remain
+available for inspection). Invalid, zero-observation, incompatible, and overflowing
+inputs return code 2 with an error on stderr. Compatible calibration profiles can
+be merged; residency comparisons use the last profile's export snapshot.
+
+Per-card estimates use each physical native expert blob rounded up to **256
+bytes**, not a uniform average or dequantized tensor size. Reports distinguish
+current resident bytes, selected bytes, and the all-resident upper bound; pinned
+tail estimates use unpadded host blob bytes. **Dense/KV is on CUDA-visible device
+0 in this runner. Only device 0's `current_minus_selected_physical_bytes`
+directly releases memory for its KV budget.** Savings on other cards are not
+additional local KV space. A negative difference means the recommendation needs
+more expert VRAM than the exported baseline, not a saving.
+
+Use the selection in the production persistent layer-sharded runner:
+
+```sh
+# Same model, visible device list/order, and geometry as the profile:
+build-ds41/ds41_generate ... --expert-gpus 0,1,2,3 \
+  --cache-seed selected.seed --arena-gib 96 --vram-margin 2 \
+  --route-bias 0 --route-bias-file 0
+```
+
+`--cache-seed` is restricted to persistent multi-GPU mode and is mutually
+exclusive with `--rank`. It reuses the existing ranked seeder: selected IDs come
+first, every remaining owned expert follows into the pinned tail. Each card gets
+exactly its selected slot quota (including zero); `--slots` remains an optional
+per-card upper bound. Initialization rejects insufficient VRAM or aggregate
+`--arena-gib`/arena-cap coverage. After allocation it verifies every selected ID
+is actually resident, every unselected ID is pinned, and no file-tier expert
+remains. Allocation shortfalls fail rather than silently claiming the target.
+Caches and IDs stay fixed across prefill and requests. No automatic adjustment
+of context length or KV geometry is made.
+
+On the local four-RTX-8000 system, selecting all experts observed in eight
+calibration prompts retained 11,085 of 15,360 experts in VRAM. Actual seeded
+execution reached **99.170% aggregate decode hits** on four separate held-out
+prompts and released about **9.84 GiB on GPU0** by `nvidia-smi`, with identical
+generated IDs. This is not 99% on every prompt: one held-out prompt reached
+98.575%. A smaller selection targeting only 99% calibration coverage missed
+the held-out goal. See the [measured residency report](bench/RESULTS.md#profile-guided-expert-residency)
+for selection policy, RAM costs, phase coverage and limitations. The default
+cache remains unchanged; do not deploy a reduced seed without measuring your
+own workload.
+
+The aggregate ASCII format is `DS41_ROUTES_V1`, then `model HEADER_FNV1A64
+FIRST_FILE_BYTES`, `geometry LAYERS EXPERTS TOP_K HIDDEN FF`, one
+`expert L E DEVICE BLOB_BYTES ALIGNED_BYTES GATE_TYPE UP_TYPE DOWN_TYPE` per
+routed expert, and `count L E PREFILL DECODE RESIDENT_0_OR_1` for every geometry
+cell. `DS41_SEED_V1` repeats the model/geometry/expert metadata verbatim and adds
+`select L E` lines. Geometry, quantization layouts, and device ownership must
+match. Model identity is a first-64-KiB FNV-1a fingerprint plus the first file's
+size: an accidental-mismatch check, **not** a cryptographic verification of every
+model shard or external config. Keep those artifacts matched independently.
+
+CPU-only focused checks:
+
+```sh
+python tools/v41/test_expert_residency.py
+ctest --test-dir build-ds41 -R 'ds41_(runner_selection|expert_residency|standard)$' --output-on-failure
+```
+
+The exact-selection CUDA fixture is part of the explicitly leased
+`test_ds41_runner --cuda` run. CPU checks do not establish a real-workload 99%
+hit rate, long-context fit, or unchanged GPU performance.
+
 ## Experimental multi-GPU expert capacity prototype
 
+This earlier diagnostic remains separate from the supported runner above.
 `STRATA_DS41_MGPU=ON` builds a separate resident-layer expert runner. It is
 off by default, is not linked into `ds41_generate`, and does **not** enable
 multi-GPU generation or serving. No checkpoint was loaded for its validation.
@@ -146,6 +322,44 @@ Decode, routing and the normal Strata engine are unchanged.
 The batch kernel reuses the existing finite SwiGLU clamp and q8_1 activation
 quantizer, including FP32 scale selection, integer rounding and FP16 scale
 storage. It does not implement LoRA or tail-scale layouts.
+
+`STRATA_DS41_BATCH_FUSED_GU=1` additionally opts the batch kernel into a
+fused gate/up, SwiGLU and hidden-q8_1 launch. It requires `--chunk-batch`;
+without that flag it has no effect. Unset or `=0` keeps the original
+three-launch batch path. The fused path uses two launches: one CTA computes
+32 gate/up rows for up to four tokens, exchanges their clamped SwiGLU
+values in shared memory, and runs the existing q8_1 quantizer before the
+unchanged down kernel. This removes one launch and the global FP32
+gate/up writes and reads (36 KiB per routed token), but does not change
+scratch allocation, transfers, expert residency or decode.
+The same weight decoding, warp reduction order, explicitly rounded
+SwiGLU product and q8_1 scale/rounding rules are retained.
+The `ds41_batch` and `ds41_batch_fused_gu` CTests explicitly select off/on
+and compare all output floats and hidden q8_1 storage, including untouched
+entry guards, against grouped execution with nonzero synthetic weights.
+Do not infer end-to-end improvement from the removed memory operations;
+compare the same prompt and geometry with only this environment variable
+changed before enabling it for a workload.
+
+On physical GPU 0 (Quadro RTX 8000, SM75), Linux, GCC 13.3 and CUDA 13.4,
+the off/on CTests both passed with seed 7319, full-width nonzero synthetic
+weights and the cases below. All output floats and hidden q8_1 bytes were
+bitwise equal to grouped execution; mixed gate/up FP64 reference relative
+L2 errors were below `8.4e-8`. The two tests ran sequentially, not as an
+interleaved off/on experiment. Each test retained the five alternating
+grouped/batch pairs of ten launches described below.
+
+| Q2_K/Q2_K/Q3_K routed entries | Unfused batch median [min, max], ms | Fused batch median [min, max], ms |
+| --- | --- | --- |
+| 3 | 0.153 [0.153, 0.153] | 0.181 [0.180, 0.181] |
+| 15 | 0.530 [0.530, 0.531] | 0.567 [0.562, 0.571] |
+| 65 | 2.236 [1.888, 2.272] | 1.910 [1.851, 2.210] |
+| 257 | 7.502 [7.369, 7.657] | 7.498 [7.287, 7.929] |
+
+These measurements do **not** establish a general speedup: sparse groups
+regressed, the 65-entry ranges overlap, and the largest case was flat.
+The fused path remains experimental and off by default. No real-model
+throughput or quality comparison was run for this fusion.
 
 Synthetic checks on physical GPU 1, a Quadro RTX 8000 (SM75), Linux and CUDA
 13.4, used full 5120/2304 matrices, seed 7319 and no model weights. All output
@@ -350,7 +564,8 @@ storage. No default changed.
 The combined CPU suite passed 10/10 and the CUDA suite 19/19. See
 [the benchmark report](bench/RESULTS.md#integrated-roadmap-checkpoint-comparison)
 for exact settings, build revision, commands, results and limitations. This
-does not validate real DSpark speculation or multi-GPU checkpoint generation.
+single-GPU checkpoint does not validate real DSpark speculation or multi-GPU
+generation; the later supported multi-GPU results are linked above.
 
 ## Serve through the isolated adapter
 
@@ -402,7 +617,8 @@ separate arguments, for example
 
 The adapter supports text and completed tool calls, including streaming
 OpenAI and Anthropic responses. It rejects unsupported forced tool choice,
-vision, multi-GPU serving, penalties and logit bias. Incremental tool
+vision, penalties and logit bias. Multi-GPU uses the same isolated process
+and token protocol as single-GPU. Incremental tool
 argument deltas, batching and session persistence are not implemented.
 
 ## DSpark readiness (optional, off by default)
@@ -476,10 +692,10 @@ The source checkout is not modified by this add-on.
 This is an experimental Linux x86-64 CPU/NVIDIA path. It does not establish Windows,
 AMD HIP, Intel SYCL or Apple Metal support, nor does it establish
 reference-logit equivalence, model quality or throughput on this machine.
-Multi-GPU operation and optional speculative/fused paths should not be
-inferred from Strata's support for those features on its Qwen models.
+Multi-GPU support is the explicitly documented DS41 layer-sharded path above,
+not Strata's Qwen pipeline or its optional speculative/fused paths.
 
-## Validation on this machine
+## Original single-GPU port validation on this machine
 
 Checked on Linux, CUDA 13.4, one Quadro RTX 8000 (48 GiB, SM75) selected with
 `CUDA_VISIBLE_DEVICES=0`, and 251 GiB system RAM. The machine has four GPUs,
@@ -518,7 +734,8 @@ arguments on the launcher. The normal Strata engine is not affected.
 
 These are short loading/generation and API compatibility checks, not model
 quality, long-context, throughput or reference-logit benchmarks. Real-model
-tool calling, DSpark, fused ggml operations and multi-GPU were not validated.
+tool calling, DSpark, fused ggml operations and multi-GPU were not validated
+in these original smoke checks; subsequent multi-GPU evidence is linked above.
 HIP, SYCL and Metal were not built because the add-on does not support them;
 their existing Strata sources were left unchanged.
 
