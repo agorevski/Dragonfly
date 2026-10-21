@@ -473,6 +473,24 @@ build jobs. The CPU and CUDA standard GGUF tests passed together in 7.28 s;
 a repeated CUDA launcher test passed in 7.09 s, with physical GPU 1's total
 used memory sampled every 0.2 s peaking at 665 MiB.
 
+## Optional compact expert launch tiles
+
+`STRATA_DS41_BATCH_TIGHT_GRID=1` packs each resident or streamed expert
+group into four- or eight-column tiles for `--chunk-batch`. The original
+rectangular grid also launched tiles beyond each shorter group's end;
+the compact path launches only active tiles. It retains the absolute entry
+order, weight pointers, activation quantization and weighted-output order.
+Pointer/start metadata can grow to the routed-entry capacity, but no extra
+expert weights are retained. Other expert layouts keep their existing path.
+
+This is opt-in and affects prompt chunks, not decode. Unset or `=0` keeps
+the original metadata and launch path. Short prompts still need
+`STRATA_SERVE_STEP_MAX=0` to exercise layer-major batching. The benchmark
+harness exposes the same switch as `--batch-tight-grid`, which requires
+`--chunk-batch`. See the [same-machine investigation](bench/RESULTS.md#further-prefill-investigation-2026-10-20)
+for measurements and limits; four GPUs share expert capacity, not tensor
+parallel compute.
+
 ## Optional device-resident decode activations
 
 `STRATA_DEVICE_ACTIVATIONS=1` keeps the one-token dense FFN input on the

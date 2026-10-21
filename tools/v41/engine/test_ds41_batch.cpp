@@ -9,7 +9,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace k = strata::kernels;
@@ -97,8 +99,145 @@ static void chunk_dispatch(const std::vector<uint8_t>& blobs, size_t bytes,
     }
 }
 
+static void chunk_tight_grid(const std::vector<uint8_t>& blobs, size_t bytes,
+                             const std::vector<float>& inputs) {
+    using namespace strata::v41;
+    constexpr int H = 5120;
+    for (int experts : {3, 5}) {
+        const int n = experts == 3 ? 9 : 17;
+        const int passes = experts == 3 ? 4 : 2;
+        constexpr int grown_n = 129;
+        Ds41MoeGeom g;
+        g.n_embd = H; g.n_ff = 2304;
+        g.n_layers = 1; g.n_experts = experts; g.top_k = 2;
+        g.gu_type = 10; g.d_type = 11; g.swiglu_limit = 10;
+        Ds41MemoryBlobs src(g, bytes);
+        for (int e = 0; e < experts; ++e) src.set(0, e, blobs.data() + (e % 2) * bytes);
+        std::vector<int> all(experts);
+        for (int e = 0; e < experts; ++e) all[e] = e;
+        std::vector<std::vector<int>> seeds = {{}, all};
+        if (experts == 5) {
+            seeds.push_back({0, 1});
+            seeds.push_back({2, 3});
+        }
+        std::vector<float> changed((size_t) n * H);
+        for (int t = 0; t < n; ++t)
+            for (int r = 0; r < H; ++r)
+                changed[(size_t) t * H + r] =
+                    .75f * inputs[(size_t) ((t + 1) % n) * H + r] + .125f * (r % 7 - 3);
+        std::vector<float> grown;
+        if (experts == 3) {
+            grown.resize((size_t) grown_n * H);
+            for (int t = 0; t < grown_n; ++t)
+                for (int r = 0; r < H; ++r)
+                    grown[(size_t) t * H + r] =
+                        .5f * inputs[(size_t) ((t + 2) % n) * H + r] + .25f * (r % 11 - 5);
+        }
+        for (const auto& seed : seeds) {
+            std::vector<std::vector<float>> ref(passes, std::vector<float>((size_t) n * H));
+            if (experts == 3) ref[2].resize((size_t) grown_n * H);
+            std::vector<std::vector<float>> got = ref;
+            for (bool batch : {false, true}) {
+                Ds41MoeConfig cfg;
+                cfg.chunk_batch = batch;
+                cfg.slots = (int) seed.size(); cfg.no_cache = seed.empty();
+                cfg.arena_gib = cfg.max_arena_gib = seed.size() == (size_t) experts ? 0 : .125;
+                cfg.mem_floor_gib = 40;
+                cfg.persistent_cache = cfg.arena_skip_resident = cfg.pin = true;
+                cfg.arena_adapt = cfg.vram_lru = cfg.chunk_prestage = false;
+                cfg.pcie_frac = 1; cfg.pf_b = 0; cfg.threads = 1;
+                cfg.chunk_prefetch = false;
+                Ds41MoeTier tier;
+                std::string err;
+                if (!tier.init(g, &src, cfg, err)) {
+                    std::fprintf(stderr, "tight grid fixture init: %s\n", err.c_str());
+                    std::exit(1);
+                }
+                std::vector<std::pair<int32_t, int32_t>> ranked;
+                for (int e : seed) ranked.emplace_back(0, e);
+                for (int e : all)
+                    if (std::find(seed.begin(), seed.end(), e) == seed.end()) ranked.emplace_back(0, e);
+                REQUIRE(tier.seed_from_ranked(ranked, err));
+                auto check_tiers = [&] {
+                    REQUIRE(tier.resident() == (int64_t) seed.size());
+                    REQUIRE(tier.arena_experts() == experts - (int64_t) seed.size());
+                    REQUIRE(tier.file_tier() == 0);
+                    for (int e : all) {
+                        const bool resident = std::find(seed.begin(), seed.end(), e) != seed.end();
+                        REQUIRE(tier.resident(0, e) == resident);
+                        REQUIRE(tier.in_arena(0, e) == !resident);
+                    }
+                };
+                check_tiers();
+                const char* tight = std::getenv("STRATA_DS41_BATCH_TIGHT_GRID");
+                if (batch && experts == 3 && seed.empty() && tight && std::strcmp(tight, "1") == 0) {
+                    const int32_t ids[] = {0, 1};
+                    const float weights[] = {.25f, .75f};
+                    std::vector<float> rejected(H, NAN);
+                    tier.reset_stats();
+                    REQUIRE(!tier.run_chunk(0, std::numeric_limits<int32_t>::max(), ids, weights,
+                                            inputs.data(), rejected.data()));
+                    check_tiers();
+                    REQUIRE(tier.stats().lookups() == 0 && tier.stats().file_tier == 0);
+                    for (float v : rejected) REQUIRE(std::isnan(v));
+                    std::puts("tight grid overflowing entry count rejected with output and tier state unchanged");
+                }
+                for (int pass = 0; pass < passes; ++pass) {
+                    const int nt = pass == 2 ? grown_n : n;
+                    std::vector<int32_t> ids(2 * nt);
+                    std::vector<float> weights(2 * nt);
+                    for (int t = 0; t < nt; ++t) {
+                        if (experts == 3) {
+                            if (pass == 0 || pass == 3) {
+                                const int omitted = t % 3;
+                                ids[2 * t] = (omitted + 1) % 3;
+                                ids[2 * t + 1] = (omitted + 2) % 3;
+                            } else {
+                                // A ubiquitous expert prevents a global-max bound
+                                // from removing the short experts' empty tiles.
+                                ids[2 * t] = 0;
+                                ids[2 * t + 1] = 1 + (t + pass - 1) % 2;
+                            }
+                        } else {
+                            // Counts 11/11/6/6/0, then 6/6/11/11/0: a staged
+                            // subset's maximum differs from the resident maximum.
+                            ids[2 * t] = ((t < 11 ? 0 : 2) + 2 * pass) % 4;
+                            ids[2 * t + 1] = ids[2 * t] + 1;
+                        }
+                        weights[2 * t] = .25f + .125f * pass;
+                        weights[2 * t + 1] = 1 - weights[2 * t];
+                    }
+                    auto& out = batch ? got[pass] : ref[pass];
+                    std::fill(out.begin(), out.end(), NAN);
+                    tier.reset_stats();
+                    const float* input = pass == 0 ? inputs.data() :
+                                         pass == 1 ? changed.data() : grown.data();
+                    REQUIRE(tier.run_chunk(0, nt, ids.data(), weights.data(), input, out.data()));
+                    check_tiers();
+                    REQUIRE(tier.stats().cpu == 0 && tier.stats().file_tier == 0);
+                    REQUIRE((tier.stats().hits > 0) == !seed.empty());
+                    REQUIRE((tier.stats().pcie > 0) == (seed.size() < (size_t) experts));
+                }
+            }
+            for (int pass = 0; pass < passes; ++pass) {
+                for (float v : got[pass]) REQUIRE(std::isfinite(v));
+                REQUIRE(std::memcmp(ref[pass].data(), got[pass].data(), got[pass].size() * sizeof(float)) == 0);
+            }
+            REQUIRE(std::memcmp(got[0].data(), got[1].data(), got[0].size() * sizeof(float)) != 0);
+            uint64_t hash = 14695981039346656037ull;
+            for (const auto& out : got)
+                for (size_t i = 0; i < out.size() * sizeof(float); ++i)
+                    hash = (hash ^ ((const uint8_t*) out.data())[i]) * 1099511628211ull;
+            std::printf("tight grid chunk %d experts/%d resident, %d requests, %d..%d tokens, changed inputs/routes: "
+                        "weighted output bitwise exact digest=%016llx\n",
+                        experts, (int) seed.size(), passes, n, experts == 3 ? grown_n : n,
+                        (unsigned long long) hash);
+        }
+    }
+}
+
 static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng,
-                bool dispatch = true, int gu_mode = -1) {
+                bool dispatch = true, int gu_mode = -1, bool tight_grid = false) {
     constexpr int H = 5120, FF = 2304, NG = 3;
     // One empty group, nonzero entry offset, unequal lengths, and nonidentity routing.
     const int count = 2 * per + 1, cap = count + 2, ntok = per + 2;
@@ -225,13 +364,22 @@ static void run(int gt, int ut, int per, bool oracle, std::mt19937& rng,
     CK(cudaMemcpy(ref.data(), out.p, ref.size() * sizeof(float), cudaMemcpyDeviceToHost));
     REQUIRE(std::memcmp(ref.data(), got.data(), ref.size() * sizeof(float)) == 0);
     if (dispatch && oracle && gt == 10 && ut == 10) chunk_dispatch(blobs, L.bytes, inputs, ntok);
+    if (tight_grid) chunk_tight_grid(blobs, L.bytes, inputs);
 }
 
 int main(int argc, char** argv) {
     const bool quick = argc == 2 && std::strcmp(argv[1], "--quick") == 0;
     const bool probe = argc == 2 && std::strcmp(argv[1], "--probe") == 0;
     const bool gu_layouts = argc == 2 && std::strcmp(argv[1], "--gu-layouts") == 0;
-    REQUIRE(argc == 1 || quick || probe || gu_layouts);
+    const bool tight_grid = argc == 2 && std::strcmp(argv[1], "--tight-grid") == 0;
+    REQUIRE(argc == 1 || quick || probe || gu_layouts || tight_grid);
+    if (tight_grid) {
+#ifdef _WIN32
+        REQUIRE(_putenv_s("STRATA_PRESTAGE_GIB", "0") == 0);
+#else
+        REQUIRE(setenv("STRATA_PRESTAGE_GIB", "0", 1) == 0);
+#endif
+    }
     if (gu_layouts) {
         REQUIRE(!std::getenv("STRATA_EXP_MODE_T10") && !std::getenv("STRATA_EXP_MODE_T11"));
         // Isolate GU changes: retain the default Q3_K down projection for both sides of the comparison.
@@ -253,7 +401,8 @@ int main(int argc, char** argv) {
     std::printf("STRATA_DS41_BATCH_FUSED_GU=%s\n", std::getenv("STRATA_DS41_BATCH_FUSED_GU") ?
                 std::getenv("STRATA_DS41_BATCH_FUSED_GU") : "(unset; unfused)");
     for (const char* name : {"STRATA_DS41_BATCH_COLS", "STRATA_DS41_BATCH_PAIR_GU",
-                             "STRATA_DS41_BATCH_DOWN_WARPS"})
+                             "STRATA_DS41_BATCH_DOWN_WARPS",
+                             "STRATA_DS41_BATCH_TIGHT_GRID", "STRATA_PRESTAGE_GIB"})
         std::printf("%s=%s\n", name, std::getenv(name) ? std::getenv(name) : "(unset)");
     auto L = k::native_expert_layout(10, 11, 5120, 2304);
     auto bad = L; bad.n_embd = 2560;
@@ -271,6 +420,13 @@ int main(int argc, char** argv) {
     REQUIRE(k::native_expert_batch(L, nullptr, nullptr, nullptr, nullptr, nullptr, 0, 0, 0,
                                   nullptr, nullptr, nullptr, nullptr));
     std::mt19937 rng(7319);
+    if (tight_grid) {
+        run(10, 10, 17, true, rng, false, -1, true);
+        for (const auto types : {std::pair{10, 11}, std::pair{11, 10}, std::pair{11, 11}})
+            run(types.first, types.second, 9, true, rng, false);
+        std::puts("PASS: ragged tight-grid dispatch, ubiquitous/empty experts, subset maxima and request growth/shrink");
+        return 0;
+    }
     if (probe) {
         for (int gt : {10, 11})
             for (int ut : {10, 11}) run(gt, ut, 9, true, rng, false);
