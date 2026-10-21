@@ -276,7 +276,10 @@ bool Ds41MoeRunner::run_multi_to_dev(int64_t l, int n, const int32_t * ids, cons
 }
 bool Ds41MoeRunner::run_chunk_dev(int64_t l, int n, const int32_t * ids, const float * w,
                                  const float * x, void * out) {
-    route_profile.observe(l, n, ids);
+    {
+        std::lock_guard<std::mutex> lock(profile_mu_);
+        route_profile.observe(l, n, ids);
+    }
     if (!sharded()) return Ds41MoeTier::run_chunk_dev(l, n, ids, w, x, out);
     return run_device(l, n, ids, w, x, out, 2);
 }

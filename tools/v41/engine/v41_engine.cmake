@@ -6,7 +6,7 @@ set(_v41_cpu "${DS41_STRATA_ROOT}/src/kernels/cpu")
 # NativeFmt and the pool's scratch buffers are larger than Qwen's. Never link this ABI to strata_kernels_cpu.
 add_library(ds41_kernels_cpu STATIC
     "${_v41_compat}/cpu/native_expert.cpp" "${_v41_compat}/cpu/pool.cpp" "${_v41_compat}/cpu/ptq1_0.cpp"
-    "${_v41_cpu}/expert.cpp" "${_v41_cpu}/expert_layout.cpp" "${_v41_cpu}/q2_avx2.cpp"
+    "${_v41_cpu}/expert.cpp" "${_v41_cpu}/expert_layout.cpp" "${_v41_cpu}/hadamard.cpp" "${_v41_cpu}/q2_avx2.cpp"
     "${_v41_cpu}/iq_avx512.cpp" "${_v41_cpu}/iq_avx2.cpp" "${_v41_cpu}/kq_avx2.cpp"
     "${_v41_cpu}/kq_avx1.cpp" "${_v41_cpu}/q2_avx1.cpp" "${_v41_cpu}/iq_avx1.cpp"
     "${_v41_cpu}/nvfp4_avx512.cpp" "${_v41_cpu}/nvfp4_avx2.cpp")

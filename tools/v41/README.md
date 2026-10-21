@@ -491,6 +491,19 @@ harness exposes the same switch as `--batch-tight-grid`, which requires
 for measurements and limits; four GPUs share expert capacity, not tensor
 parallel compute.
 
+## Optional wavefront pipeline (off by default)
+
+`ds41_generate` can run the layer-major prompt as a pipeline over the expert owners instead of one layer at a time
+(`STRATA_DS41_WAVEFRONT=1`, benchmark `--wavefront`, needs `--chunk-batch` and `--prompt-batch` covering the prompt,
+for example `--prompt-batch 512`). Units of two dense sub-batches (`STRATA_DS41_WAVEFRONT_SUBS`, benchmark
+`--wavefront-subs 1|2|4`) move through the layers: unit `u` attends through layer `l` only after unit `u-1` has, and each
+unit's experts run on a helper thread, serialized per owner GPU. The same operations run on the same columns, so the
+output IDs match the sequential path. Measured on four RTX 8000 with the frozen 512-token benchmark (warm median of
+two requests): sequential `--prompt-batch 128` 122.4 tok/s, sequential `--prompt-batch 512` 131.4, wavefront 180.6
+(subs 2), 153.7 (subs 1), 159.8 (subs 4). Experts off GPU0 (`--expert-gpus 1,2,3`) fall to 81.4 because the
+expert slots no longer fit. Dense work on GPU0 slows about 1.8x while owner 0's experts run there; the prefill
+graph cache does not change this. Opt-in only; the default path is unchanged.
+
 ## Optional device-resident decode activations
 
 `STRATA_DEVICE_ACTIVATIONS=1` keeps the one-token dense FFN input on the

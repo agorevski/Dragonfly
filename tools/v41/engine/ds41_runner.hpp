@@ -3,6 +3,7 @@
 #include "ds41_moe.hpp"
 #include "ds41_route_profile.hpp"
 #include <functional>
+#include <mutex>
 
 namespace strata::v41 {
 
@@ -21,6 +22,10 @@ public:
     std::string route_profile_path;
     bool write_route_profile() const;
     bool sharded() const { return !shards_.empty(); }
+    /// Number of expert owners (shards, or 1 unsharded) and the owner index of a layer: the wavefront serializes
+    /// calls per owner, since one shard's tier keeps per-call state.
+    int owner_count() const { return sharded() ? (int) shards_.size() : 1; }
+    int owner_of(int64_t layer) const { return sharded() && layer >= 0 && size_t(layer) < owners_.size() ? (int) owners_[size_t(layer)] : 0; }
     bool seed_from_ranked(const std::vector<std::pair<int32_t, int32_t>> &, std::string &);
     bool build_arena_ranked(const std::vector<std::pair<int32_t, int32_t>> &, std::string &);
     bool run(int64_t, const int32_t *, const float *, const float *, float *);
@@ -54,6 +59,7 @@ private:
     bool run_device(int64_t, int, const int32_t *, const float *, const float *, void *, int, const void * = nullptr);
     std::vector<Shard> shards_;
     std::vector<size_t> owners_;
+    std::mutex profile_mu_;   ///< route_profile is shared by all owners when the wavefront runs them concurrently
     int64_t hidden_ = 0;
     bool initialized_ = false;
     mutable Ds41MoeStats aggregate_;

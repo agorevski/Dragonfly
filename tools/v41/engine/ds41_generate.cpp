@@ -46,6 +46,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <future>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -1033,6 +1034,123 @@ int main(int argc, char ** argv) {
                     if (!enc_reported) { enc_reported = true; std::fprintf(stderr, "enc-skip: first batch B=%d, cut=%d (phase A %d cols, phase B %d)\n", B, cut, cut, B - cut); }
                 }
                 double t0 = now_ms();
+                static const bool wf_env = [] { const char * v = std::getenv("STRATA_DS41_WAVEFRONT"); return v && v[0] == '1'; }();
+                static const int wf_subs = [] { const char * v = std::getenv("STRATA_DS41_WAVEFRONT_SUBS"); return v ? std::max(1, std::atoi(v)) : 2; }();
+                const bool wf = wf_env && !routed_host && bcap_n == 0 && dense.routed_dev() != nullptr && B > SB &&
+                                (cut == 0 || cut % (wf_subs * SB) == 0);
+                if (wf) {
+                    // ---- wavefront (STRATA_DS41_WAVEFRONT=1): units of wf_subs dense sub-batches move through the layers
+                    // as a pipeline over the expert owners.  Attention of unit u at layer l waits for unit u-1's
+                    // attention through l (the layer's KV state advances in column order, as the sequential path).  A
+                    // unit's experts run on a helper thread, one call per layer, serialized per owner GPU; its finish
+                    // waits for them.  Every op is the sequential path's op on the same columns, so outputs match.
+                    const int U = wf_subs * SB;
+                    const int NU = (B + U - 1) / U;
+                    float * wrdev = dense.routed_dev();
+                    auto kind_of = [&](int u, int l) -> int {   // 0 none, 1 full, 2 persistent KV only (phase A at CL)
+                        if (!(cut > 0 && (u + 1) * U <= cut)) return 1;
+                        return l < CL ? 1 : (l == CL ? 2 : 0);
+                    };
+                    std::vector<int> last_a(NU, -1);
+                    for (int u = 0; u < NU; ++u)
+                        for (int l = 0; l < n_layer; ++l)
+                            if (kind_of(u, l) > 0) last_a[u] = l;
+                    struct Unit { int cur = 0; int stage = 0; int a_done = -1; std::future<bool> ex; };   // stage: 0 attn next, 1 experts running, 2 finish next
+                    std::vector<Unit> units(NU);
+                    std::vector<std::mutex> owner_mu(tier.owner_count());
+                    std::vector<double> owner_ms(tier.owner_count(), 0.0);   // expert wall per owner (diagnostic)
+                    std::mutex owner_ms_mu;
+                    double dense_ms = 0.0, wait_ms = 0.0;
+                    auto cols_end = [&](int u) { return std::min(B, (u + 1) * U); };
+                    auto advance = [&](int u) {   // skip layers with no work for unit u
+                        while (units[u].cur < n_layer && kind_of(u, units[u].cur) == 0) units[u].cur++;
+                    };
+                    auto expert_unit = [&](int u, int l) -> bool {
+                        const int o = tier.owner_of(l);
+                        std::lock_guard<std::mutex> lock(owner_mu[o]);
+                        const auto t0w = std::chrono::steady_clock::now();
+                        const int e = cols_end(u);
+                        bool ok = true;
+                        for (int s = u * U; s < e && ok; s += piece) {
+                            const int pn = std::min(piece, e - s);
+                            ok = tier.run_chunk_dev(l, pn, dense.batch_ids() + (size_t) s * top_k, dense.batch_wts() + (size_t) s * top_k,
+                                                    dense.batch_fn() + (size_t) s * n_embd, wrdev + (size_t) s * n_embd);
+                        }
+                        std::lock_guard<std::mutex> ms(owner_ms_mu);
+                        owner_ms[o] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0w).count();
+                        return ok;
+                    };
+                    bool wf_ok = true;
+                    auto fail = [&](const std::string & why) { if (wf_ok) ferr = why; wf_ok = false; };
+                    for (;;) {
+                        bool any_left = false;
+                        for (int u = 0; u < NU; ++u) { advance(u); any_left |= units[u].cur < n_layer; }
+                        if (!any_left || !wf_ok) break;
+                        bool progressed = false, pending = false;
+                        // 1) finish the units whose experts are done
+                        for (int u = 0; u < NU && wf_ok; ++u) {
+                            advance(u);
+                            Unit & w = units[u];
+                            if (w.cur >= n_layer) continue;
+                            if (w.stage == 1) {
+                                if (w.ex.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { pending = true; continue; }
+                                if (!w.ex.get()) { fail("tier run refused"); break; }
+                                w.stage = 2;
+                            }
+                            if (w.stage == 2) {
+                                const auto td = std::chrono::steady_clock::now();
+                                const int e = cols_end(u);
+                                for (int s = u * U; s < e; s += SB) {
+                                    if (!dense.finish_span(w.cur, s, std::min(SB, e - s))) { fail(dense.last_error()); break; }
+                                }
+                                dense_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - td).count();
+                                if (!wf_ok) break;
+                                w.stage = 0;
+                                w.cur++;
+                                progressed = true;
+                            }
+                        }
+                        if (!wf_ok) break;
+                        // 2) attention for the next layer of every unit whose predecessor has finished attention through it
+                        for (int u = 0; u < NU && wf_ok; ++u) {
+                            advance(u);
+                            Unit & w = units[u];
+                            if (w.cur >= n_layer || w.stage != 0) continue;
+                            const int l = w.cur;
+                            if (u > 0 && units[u - 1].a_done < std::min(l, last_a[u - 1])) continue;
+                            const int k = kind_of(u, l);
+                            const int e = cols_end(u);
+                            const auto ta = std::chrono::steady_clock::now();
+                            for (int s = u * U; s < e; s += SB) {
+                                const int sn = std::min(SB, e - s);
+                                const bool ok = k == 2 ? dense.attn_router_span_kv(CL, s, sn) : dense.attn_router_span(l, s, sn);
+                                if (!ok) { fail(dense.last_error()); break; }
+                            }
+                            dense_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
+                            if (!wf_ok) break;
+                            w.a_done = l;
+                            progressed = true;
+                            if (k == 2) { w.cur++; continue; }
+                            w.stage = 1;
+                            w.ex = std::async(std::launch::async, expert_unit, u, l);
+                        }
+                        if (!wf_ok) break;
+                        if (!progressed) {
+                            if (!pending) { fail("wavefront stalled"); break; }
+                            const auto tw = std::chrono::steady_clock::now();
+                            for (auto & w : units)
+                                if (w.stage == 1) { w.ex.wait_for(std::chrono::microseconds(200)); break; }
+                            wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
+                        }
+                    }
+                    for (auto & w : units)   // never leave a helper thread running into the caller's locals
+                        if (w.ex.valid() && !w.ex.get()) fail("tier run refused");
+                    std::fprintf(stderr, "wavefront: %d units x %d columns; dense busy %.0f ms, dense waiting %.0f ms; expert ms per owner:",
+                                 NU, U, dense_ms, wait_ms);
+                    for (double ms : owner_ms) std::fprintf(stderr, " %.0f", ms);
+                    std::fprintf(stderr, "\n");
+                    if (!wf_ok) return false;
+                } else
                 for (int l = 0; l < n_layer; ++l) {
                     if (l < 4) vram_log("batch layer", l);
                     // layer 20 is the last kv source: for phase A only its persistent KV writes run; layers 21-39 run

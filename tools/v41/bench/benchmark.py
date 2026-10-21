@@ -124,6 +124,7 @@ def run_protocol(args, ids, result):
         "STRATA_DS41_PREFILL_ROW_CACHE": args.prefill_row_cache,
         "STRATA_DS41_BATCH_PAIR_GU": args.pair_gu,
         "STRATA_DS41_BATCH_TIGHT_GRID": args.batch_tight_grid,
+        "STRATA_DS41_WAVEFRONT": args.wavefront,
         "STRATA_MOE_DEVICE_INPUT": args.moe_device_input,
         "STRATA_MOE_PEER_OUTPUT": args.moe_peer_output,
         "STRATA_DS41_BATCH_FUSED_GU": args.fused_gu,
@@ -137,6 +138,8 @@ def run_protocol(args, ids, result):
             env[name] = "1"
     if args.down_mode is not None:
         env["STRATA_EXP_MODE_T11"] = str(args.down_mode)
+    if args.wavefront_subs is not None:
+        env["STRATA_DS41_WAVEFRONT_SUBS"] = str(args.wavefront_subs)
     if args.gu_mode is not None:
         env["STRATA_EXP_MODE_T10"] = str(args.gu_mode)
     if args.batch_columns is not None:
@@ -306,6 +309,11 @@ def main():
                         help="explicit expert down-projection block geometry; requires --chunk-batch")
     parser.add_argument("--batch-tight-grid", action="store_true",
                         help="pack active expert column tiles without padded groups; requires --chunk-batch")
+    parser.add_argument("--wavefront", action="store_true",
+                        help="pipeline 128-token units across the expert owners (STRATA_DS41_WAVEFRONT=1); "
+                             "requires --chunk-batch and a --prompt-batch covering the prompt")
+    parser.add_argument("--wavefront-subs", type=int, choices=(1, 2, 4),
+                        help="dense sub-batches per wavefront unit (default 2); requires --wavefront")
     parser.add_argument("--pair-gu", action="store_true",
                         help="share gate/up activation loads; requires --chunk-batch --fused-gu")
     parser.add_argument("--prefill-graph-cache", action="store_true",
@@ -341,6 +349,10 @@ def main():
         parser.error("--batch-down-warps requires --chunk-batch")
     if args.batch_tight_grid and not args.chunk_batch:
         parser.error("--batch-tight-grid requires --chunk-batch")
+    if args.wavefront and not args.chunk_batch:
+        parser.error("--wavefront requires --chunk-batch")
+    if args.wavefront_subs is not None and not args.wavefront:
+        parser.error("--wavefront-subs requires --wavefront")
     if args.pair_gu and not (args.chunk_batch and args.fused_gu):
         parser.error("--pair-gu requires --chunk-batch --fused-gu")
     gpu_ids = args.gpus.split(",")

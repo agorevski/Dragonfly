@@ -48,6 +48,12 @@ struct NativeFmt {
     /// projection's FP32 output: gate * s_gate, up * s_up, down * s_down. Do not fold s_down into up: the hidden
     /// drops to ~1e-5 and its q8 block scale becomes an FP16 subnormal (expert error 2-12% instead of 1.1%).
     size_t tail_off = 0;
+    /// prism.hadamard (hadamard.hpp): set only by expert_layout_load for Hadamard-folded packs.  DS41 never loads
+    /// such a pack, so these stay at their defaults (had_block 0 = none) and no rotation runs.
+    int had_block = 0;
+    bool had_gu = false, had_d = false;
+    const float* gu_signs = nullptr;    ///< n_embd signs for x (nullptr: identity)
+    const float* d_signs = nullptr;     ///< n_ff signs for h (nullptr: identity)
 };
 constexpr int kNvfp4Type = 40;
 constexpr size_t kNvfp4Tail = 16;
