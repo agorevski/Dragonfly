@@ -116,6 +116,15 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
                            int64_t grid_groups = 0, const NativeExpertLora* lora = nullptr);
+/// Opt-in DS41 5120/2304 Q2_K/Q3_K gate/up and Q3_K down, four activation rows per tile.
+/// Same device indexing and scratch contract as native_expert_grouped. No LoRA or tail scales.
+bool native_expert_batch_supported(const NativeExpertLayout& L) noexcept;
+/// max_group_entries must bound every group's entry count; all other capacities bound the device arrays.
+/// Unsupported layouts or launch bounds return false without launching (never a CPU fallback).
+bool native_expert_batch(const NativeExpertLayout& L, const unsigned long long* grp_ptr,
+                         const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_dst,
+                         const int32_t* ent_tok, int64_t cap_groups, int64_t cap_entries,
+                         int max_group_entries, const void* x_q8_1, void* scratch, float* out, void* stream);
 /// The routed-expert LoRA's down correction on its own (for the MMQ chunk path): entries [0, n), expert ent_exp[i],
 /// float SwiGLU row h + i * n_ff, adds b_d[e] * (a_d[e] . h) into row ent_dst[i] of `out` (n_embd floats).
 void native_expert_lora_down(const NativeExpertLora& lora, const int32_t* ent_exp, const int32_t* ent_dst,

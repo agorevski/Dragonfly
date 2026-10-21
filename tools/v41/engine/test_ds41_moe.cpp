@@ -11,8 +11,14 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
+#if defined(DS41_TEST_CUDA)
+#include <cuda_runtime.h>
+#endif
+
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -157,9 +163,133 @@ int cache_test(bool gpu) {
     return 0;
 }
 
+#if defined(DS41_TEST_CUDA)
+int device_activation_test() {
+    auto check = [](cudaError_t e) {
+        if (e != cudaSuccess) {
+            std::fprintf(stderr, "activation fixture CUDA: %s\n", cudaGetErrorString(e));
+            std::exit(1);
+        }
+    };
+    Ds41MoeGeom g;
+    g.n_embd = g.n_ff = 256;
+    g.n_layers = 1;
+    g.n_experts = 4;
+    g.top_k = 2;
+    g.gu_type = g.d_type = 11;
+    cpu::NativeFmt fmt;
+    std::string err;
+    if (!ds41_moe_blob_layout(g, fmt, err)) return 1;
+    Ds41MemoryBlobs src(g, fmt.bytes);
+    std::mt19937 rng(17);
+    std::uniform_real_distribution<float> random(-0.1f, 0.1f);
+    std::vector<uint8_t> blob(fmt.bytes);
+    std::vector<float> row(256), x(256), expected(256), actual(256);
+    std::vector<std::pair<int32_t, int32_t>> ranked;
+    const size_t rb = row_bytes(11, 256);
+    for (int e = 0; e < 4; ++e) {
+        for (size_t r = 0; r < fmt.bytes / rb; ++r) {
+            for (float &v : row) v = random(rng);
+            ggml_get_type_traits(GGML_TYPE_Q3_K)->from_float_ref(row.data(), blob.data() + r * rb, 256);
+        }
+        src.set(0, e, blob.data());
+        ranked.emplace_back(0, e);
+    }
+    for (float &v : x) v = random(rng);
+    void *dx = nullptr, *dy = nullptr;
+    check(cudaMalloc(&dx, x.size() * sizeof(float)));
+    check(cudaMalloc(&dy, x.size() * sizeof(float)));
+    check(cudaMemcpy(dx, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice));
+    const int32_t ids[] = {0, 3};
+    const float weights[] = {0.6f, 0.4f};
+    std::vector<float> reference(256, 0.0f), one(256);
+    Ds41MoeGeom reference_geom = g;
+    reference_geom.cls_gu = reference_geom.cls_d = {11};
+    for (int k = 0; k < 2; ++k) {
+        src.read(0, ids[k], blob.data());
+        ref_expert(reference_geom, 0, blob.data(), x.data(), one.data());
+        for (size_t i = 0; i < reference.size(); ++i) reference[i] += weights[k] * one[i];
+    }
+    const bool forced_host = std::getenv("STRATA_X_HOST") || std::getenv("DS41_CHECK_POOL_BATCH") ||
+                             std::getenv("DS4_CHECK_GPU");
+    for (int mode = 0; mode < 4; ++mode) {
+        Ds41MoeConfig cfg;
+        cfg.threads = 2;
+        cfg.slots = mode == 0 ? 4 : 1;
+        cfg.no_cache = mode >= 2;
+        cfg.arena_gib = cfg.max_arena_gib = mode == 3 ? 0.01 : 0;
+        cfg.pcie_frac = mode == 3 ? 1 : 0;
+        cfg.pf_b = 0;
+        Ds41MoeTier tier;
+        if (!tier.init(g, &src, cfg, err) || !tier.seed_from_ranked(ranked, err)) {
+            std::fprintf(stderr, "activation fixture init: %s\n", err.c_str());
+            return 1;
+        }
+        constexpr int repeats = 16;
+        auto run = [&](bool device) {
+            const auto start = std::chrono::steady_clock::now();
+            for (int i = 0; i < repeats; ++i)
+                if (!tier.run_to_dev(0, ids, weights, device ? nullptr : x.data(), dy, device ? dx : nullptr))
+                    return -1.0;
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        };
+        // Warm both paths before comparing synchronous wall time.
+        if (run(false) < 0 || run(true) < 0) return 1;
+        tier.reset_stats();
+        const double host_ms = run(false);
+        check(cudaMemcpy(expected.data(), dy, x.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        if (host_ms < 0 || tier.stats().activation_h2d_bytes != repeats * 1024) return 1;
+        tier.reset_stats();
+        const double device_ms = run(true);
+        check(cudaMemcpy(actual.data(), dy, x.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        const auto &st = tier.stats();
+        const bool direct = !forced_host && (mode == 0 || mode == 3);
+        const int64_t bytes = direct ? 0 : repeats * 1024;
+        if (device_ms < 0 || std::memcmp(expected.data(), actual.data(), 1024) || rel(actual, reference) >= 3e-2 ||
+            st.activation_d2h_bytes != bytes || st.activation_h2d_bytes != bytes ||
+            st.device_activation_calls != (direct ? repeats : 0) ||
+            st.hits != (mode == 0 ? 2 * repeats : mode == 1 ? repeats : 0) ||
+            st.cpu != (mode == 1 ? repeats : mode == 2 ? 2 * repeats : 0) ||
+            st.pcie != (mode == 3 ? 2 * repeats : 0)) {
+            std::fprintf(stderr, "activation mode %d: mismatch or unexpected transfer/scheduler counters\n", mode);
+            return 1;
+        }
+        bool nonzero = false;
+        for (float v : actual) {
+            if (!std::isfinite(v)) return 1;
+            nonzero |= v != 0;
+        }
+        if (!nonzero) return 1;
+        std::printf("activation mode=%d: bit-identical nonzero output, dequant reference rel=%.3e; "
+                    "%d calls host=%.3f ms device=%.3f ms; "
+                    "tier D2H=%lld H2D=%lld bytes direct=%lld CPU=%lld PCIe=%lld\n",
+                    mode, rel(actual, reference), repeats, host_ms, device_ms, (long long) st.activation_d2h_bytes,
+                    (long long) st.activation_h2d_bytes, (long long) st.device_activation_calls,
+                    (long long) st.cpu, (long long) st.pcie);
+        // Reuse both device buffers with different activations and router order after the synchronous return.
+        std::vector<float> next = x;
+        for (float &v : next) v *= -0.7f;
+        const int32_t next_ids[] = {3, 0};
+        check(cudaMemcpy(dx, next.data(), 1024, cudaMemcpyHostToDevice));
+        if (!tier.run_to_dev(0, next_ids, weights, next.data(), dy)) return 1;
+        check(cudaMemcpy(expected.data(), dy, 1024, cudaMemcpyDeviceToHost));
+        if (!tier.run_to_dev(0, next_ids, weights, nullptr, dy, dx)) return 1;
+        check(cudaMemcpy(actual.data(), dy, 1024, cudaMemcpyDeviceToHost));
+        if (std::memcmp(expected.data(), actual.data(), 1024)) return 1;
+        check(cudaMemcpy(dx, x.data(), 1024, cudaMemcpyHostToDevice));
+    }
+    check(cudaFree(dy));
+    check(cudaFree(dx));
+    return 0;
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char ** argv) {
+#if defined(DS41_TEST_CUDA)
+    if (argc >= 2 && std::string(argv[1]) == "--device-activation-test") return device_activation_test();
+#endif
     if (argc >= 2 && std::string(argv[1]) == "--cache-test")
         return cache_test(argc >= 3 && std::string(argv[2]) == "--gpu");
     if (argc < 2) { std::fprintf(stderr, "usage: test_ds41_moe <file.gguf> [--layers 0,1] [--tokens 8] [--gpu] [--chunk N] [--chunk-mmq]\n"); return 2; }

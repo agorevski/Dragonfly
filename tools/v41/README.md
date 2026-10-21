@@ -51,6 +51,8 @@ build uses `-DSTRATA_DS41_CUDA=OFF`. The build fetches a pinned llama.cpp
 source archive for ggml, not model weights. To use an existing compatible
 llama.cpp checkout instead, pass
 `-DSTRATA_DS41_GGML_DIR=/path/to/llama.cpp`.
+Set `CMAKE_BUILD_PARALLEL_LEVEL=2` when building to bound the separate stock
+CUDA backend build as well as using `--parallel 2` for the add-on targets.
 
 The root Strata CMake project also exposes `STRATA_ENABLE_DS41`, which is
 `OFF` by default. A root-project opt-in build additionally needs
@@ -63,6 +65,292 @@ prefill, allocation is deferred until the prompt buffers are released.
 If the automatic budget has no room, decode uses the RAM/file tiers
 without a VRAM expert cache. An explicit `--slots N` remains a manual
 capacity choice; it must fit the available VRAM.
+
+## Experimental multi-GPU expert capacity prototype
+
+`STRATA_DS41_MGPU=ON` builds a separate resident-layer expert runner. It is
+off by default, is not linked into `ds41_generate`, and does **not** enable
+multi-GPU generation or serving. No checkpoint was loaded for its validation.
+The CPU `ds41_generate` executable was byte-identical with this option on
+and off in the same build directory (SHA-256
+`5dcc003bb6dd72817ce6914a82fe0da607610ae54ea40ae0a6f38c9cb65e7ddd`).
+
+```sh
+cmake -S tools/v41 -B build-ds41-mgpu \
+  -DSTRATA_DS41_GGML_DIR=/path/to/llama.cpp \
+  -DSTRATA_DS41_MGPU=ON -DSTRATA_DS41_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75
+cmake --build build-ds41-mgpu \
+  --target test_ds41_mgpu test_ds41_mgpu_cuda --parallel 2
+ctest --test-dir build-ds41-mgpu -R '^ds41_mgpu_plan$' --output-on-failure
+# Only after reserving physical GPUs 2 and 3:
+CUDA_VISIBLE_DEVICES=2,3 timeout 120s \
+  build-ds41-mgpu/test_ds41_mgpu_cuda --devices 0,1
+```
+
+For CPU planning only, use `STRATA_DS41_CUDA=OFF` and build
+`test_ds41_mgpu`. The CUDA test is deliberately not registered with CTest:
+it requires an explicit device lease. Device IDs are CUDA-visible ordinals.
+
+The C++ interface is `engine/ds41_mgpu.hpp`: `ds41_mgpu_plan` validates and
+sizes ownership without CUDA calls or model reads. `Ds41MultiGpuMoe::init`
+loads every routed expert of each assigned layer onto its owner, under
+explicit per-device caps for weights and workspace, while retaining a free
+VRAM reserve. An empty owner map balances contiguous layer counts, not
+heterogeneous card capacity; supply an explicit map for unequal caps.
+Duplicate device IDs, invalid mappings, unsupported formats and insufficient
+capacity fail rather than falling back to RAM or CPU execution.
+
+`run` is blocking single-token expert execution with **host** input/output
+pointers. Each owner has a nonblocking stream and bounded pinned staging;
+operations restore the caller's current device. Host staging does not enable
+peer access or assume NVLink/default-stream ordering. Initialization failure
+cleans partially loaded shards on their allocating devices. Allocation
+failures return an error; the reused native kernels retain their existing
+fatal launch-error checks.
+
+Supported inputs are uniform standard Q2_K or Q3_K gate/up/down, dimensions
+256 through 32768 in multiples of 256, 2 through 256 layers, 1 through 1024
+experts, and top-k at most 8. Every selected device must own a layer.
+There are no mixed formats, cache misses, prompt batches, device-pointer
+inputs, concurrent calls or graph support. Dense/attention/KV placement and
+the generator/server connection remain unimplemented.
+
+Synthetic tests on physical GPUs 2 and 3 (Quadro RTX 8000, SM75; one NVLink
+pair) used four layers, four experts, width/FFN 256 and top-k 2. Combined
+explicit device allocations were 1,053,072 bytes for Q2_K and 1,372,560
+bytes for Q3_K, excluding CUDA context overhead. Maximum relative L2 error
+against the existing CPU expert runner was 0.0230929 and 0.0182977,
+respectively (CUDA q8_1 versus CPU q8_K activation rounding; threshold 0.05).
+Tests cover layer-owner switching, duplicate expert IDs, repeated outputs,
+caller-device restoration, invalid requests, capacity/free-reserve rejection,
+and partial initialization cleanup followed by reinitialization.
+Physical allocator OOM and fatal CUDA failures were not induced.
+CPU tests cover explicit/noncontiguous ownership and invalid mappings.
+
+This validates only that two-device synthetic expert prototype, not
+four-device or cross-NODE execution, real-model capacity, throughput,
+logits or model quality. Full integration still needs dense/attention/KV
+ownership, inter-layer activation transfers, mixed-checkpoint validation,
+end-to-end reference checks and a same-day single-device benchmark.
+
+## Optional native expert batch tiles
+
+`ds41_generate --experts gpu --chunk-batch` opts prompt chunks into a
+four-activation-column DP4A kernel for standard 5120-wide, 2304-hidden
+experts: Q2_K or Q3_K gate/up and Q3_K down. It covers both resident and
+streamed experts without the fork MMQ ABI. Other layouts keep the grouped
+kernel. The default is **off**; `--no-chunk-batch` explicitly disables it.
+Decode, routing and the normal Strata engine are unchanged.
+
+The batch kernel reuses the existing finite SwiGLU clamp and q8_1 activation
+quantizer, including FP32 scale selection, integer rounding and FP16 scale
+storage. It does not implement LoRA or tail-scale layouts.
+
+Synthetic checks on physical GPU 1, a Quadro RTX 8000 (SM75), Linux and CUDA
+13.4, used full 5120/2304 matrices, seed 7319 and no model weights. All output
+floats and hidden q8_1 bytes matched the grouped path exactly, including
+mixed Q2_K/Q3_K gate/up, zero activations, empty groups, nonzero entry offsets,
+partial tiles and permuted token/destination indices. Independent dequantized
+FP64 accumulation references include activation rounding and clamp 10.
+The tier's `run_chunk` also matched default-off and enabled weighted outputs
+bitwise for resident and streamed synthetic experts.
+The standard CUDA GGUF fixture additionally runs the linked `ds41_generate`
+with `--chunk-batch` and `--no-chunk-batch`: full 5120/2304 Q2_K/Q3_K experts
+exercise the enabled dispatch, and a 256-wide fixture checks the grouped
+fallback. `MIMO_CHUNK_PROF=1` reports `chunk batch:` only when a batch launch
+is selected. The full-width fixture has zero weights and checks CLI wiring
+and matching generated IDs, not nonzero-model logits or quality.
+
+The microbenchmark measures only gate/up, clamped activation quantization and
+down kernels, not weight transfers, routing, dense layers or generation.
+It alternates execution order for five pairs of ten launches, after three
+warmups per measurement, using CUDA events. One measured Q2_K/Q2_K/Q3_K run:
+
+| Entries (two nonempty expert groups) | Grouped median [min, max], ms | Batch median [min, max], ms |
+| --- | --- | --- |
+| 3 | 0.162 [0.161, 0.162] | 0.153 [0.153, 0.154] |
+| 7 | 0.336 [0.336, 0.336] | 0.261 [0.260, 0.261] |
+| 15 | 0.697 [0.697, 0.698] | 0.529 [0.528, 0.529] |
+| 65 | 2.487 [2.389, 2.962] | 1.873 [1.848, 2.237] |
+| 257 | 9.813 [9.773, 11.792] | 7.337 [7.318, 7.493] |
+
+These are synthetic kernel measurements, **not a whole-model speedup**.
+No real-model quality, logits or throughput check was run for this option;
+other GPU architectures and backends were not validated. Reproduce with a
+private SM75 CUDA build using an existing ggml checkout:
+
+```sh
+cmake --build build-ds41 --target test_ds41_batch --parallel 2
+CUDA_VISIBLE_DEVICES=1 MIMO_CHUNK_STAGE_MIB=32 \
+  ctest --test-dir build-ds41 -R '^ds41_batch$' --output-on-failure -V
+CMAKE_BUILD_PARALLEL_LEVEL=2 cmake --build build-ds41 --target ds41_generate --parallel 2
+CUDA_VISIBLE_DEVICES=1 MIMO_CHUNK_STAGE_MIB=32 \
+  ctest --test-dir build-ds41 -R '^ds41_standard_cuda$' --output-on-failure -V
+```
+
+The synthetic test stays below 3 GiB of device allocations even with the
+default chunk staging size; the command above reduces that staging to
+32 MiB per half. No checkpoint or download is needed.
+The full CLI and private stock CUDA backend linked successfully with two
+build jobs. The CPU and CUDA standard GGUF tests passed together in 7.28 s;
+a repeated CUDA launcher test passed in 7.09 s, with physical GPU 1's total
+used memory sampled every 0.2 s peaking at 665 MiB.
+
+## Optional device-resident decode activations
+
+`STRATA_DEVICE_ACTIVATIONS=1` keeps the one-token dense FFN input on the
+GPU for routed experts. It is off when unset or `0`, and ignored for CPU
+experts or the `STRATA_DEC_HOSTSUM` path. Prompt batching and multi-token
+verification keep their existing activation path.
+
+Router IDs and weights still reach the host. The dense backend synchronizes
+before the tier reads the activation on its own stream; the tier completes
+before the next dense call may reuse that buffer. CPU-served selected
+experts retain a synchronized activation readback. Layers served entirely
+on the GPU can omit that readback and the tier's activation upload.
+`STRATA_X_HOST=1` forces the tier's host staging for diagnostics.
+
+The opt-in prints skipped dense activation bytes and decode-tier input
+transfer counters. These count only activation transfers, not expert weights,
+router data or routed outputs. `STRATA_DUMP_DECODE_LOGITS=PATH` optionally
+writes one raw vocabulary-wide F32 row per ordinary one-shot decode output
+for numeric comparisons; it does not record speculative or server outputs.
+The synthetic `ds41_device_activations_cuda` and
+`ds41_device_activations_host_cuda` tests cover all-resident, mixed CPU-miss,
+no-cache CPU and PCIe-served expert inputs. No full-checkpoint throughput
+improvement is established by these tests.
+
+On a Quadro RTX 8000 (SM75), Linux/CUDA 13.4, the 256-wide Q3_K
+synthetic tier fixture produced bit-identical host/device-input outputs
+in all four cases (dequantized F32 reference relative error 0.0092–0.0109).
+Over 16 all-resident calls, host input uploaded 16,384 activation bytes;
+device input transferred zero activation bytes in either direction.
+Mixed and no-cache CPU cases retained 16,384 bytes in each direction.
+These are input-transfer counts, not a model-throughput measurement.
+
+## Synthetic graph and transfer diagnostics
+
+`test_ds41_graphs` checks the composite activation rounding against an independent
+format-code reference, then replays changed inputs and nonfinite blocks.
+`test_ds41_tier_profile` uses four generated, nonzero 256-by-256 Q2_K or Q3_K
+experts, two resident slots, and changing routes/activations. It checks against
+the CPU tier (relative L2 below 0.05 for different activation quantizers) and
+requires byte-identical repeated outputs. Neither executable loads a checkpoint.
+Without `--cuda`, both run on CPU without probing a GPU.
+
+Stock ggml CUDA capture is an isolated build opt-in, off by default:
+
+```sh
+cmake -S tools/v41 -B build-ds41-graphs \
+  -DCMAKE_BUILD_TYPE=Release -DSTRATA_DS41_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75 \
+  -DSTRATA_DS41_CUDA_GRAPHS=ON -DSTRATA_DS41_CUDA_BUILD_JOBS=2
+cmake --build build-ds41-graphs \
+  --target test_ds41_graphs test_ds41_tier_profile --parallel 2
+ctest --test-dir build-ds41-graphs -R 'ds41_(graphs|tier_profile)$' --output-on-failure
+```
+
+Select an available GPU explicitly. Compare eager versus captured composite ops
+in the **same binary**; the stock disable variable is presence-based (even `0`
+disables capture):
+
+```sh
+CUDA_VISIBLE_DEVICES=3 GGML_CUDA_DISABLE_GRAPHS=1 \
+  build-ds41-graphs/test_ds41_graphs --cuda --bench
+env -u GGML_CUDA_DISABLE_GRAPHS CUDA_VISIBLE_DEVICES=3 \
+  build-ds41-graphs/test_ds41_graphs --cuda --bench
+```
+
+Compare existing expert-tier switches separately:
+
+```sh
+env -u STRATA_TIER_GRAPH -u STRATA_DMA_OVERLAP CUDA_VISIBLE_DEVICES=3 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+env -u STRATA_DMA_OVERLAP CUDA_VISIBLE_DEVICES=3 STRATA_TIER_GRAPH=1 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+env -u STRATA_TIER_GRAPH CUDA_VISIBLE_DEVICES=3 STRATA_DMA_OVERLAP=1 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+CUDA_VISIBLE_DEVICES=3 STRATA_TIER_GRAPH=1 STRATA_DMA_OVERLAP=1 \
+  build-ds41-graphs/test_ds41_tier_profile --cuda --bench
+```
+
+The two output digests should match across all four tier runs; a capture-refusal
+message means the tier graph fell back, not that capture was measured. Each
+timing reports 20 warmups and seven batches of 64 calls. `wall_sync` includes
+completed calls; `event_submission` is an event-bracketed **submission envelope**,
+not isolated kernel time. Explicit completion boundaries order the backend's
+private nonblocking streams before the stop event. Tier timings include output
+copy/checks, metadata, activation quantization and host reduction. Each measured
+CUDA tier run requires 448 resident hits and 448 pinned-arena PCIe misses with no CPU
+or file-tier work. The fakequant graph reports its node count and scratch bytes.
+These small synthetic results are not model latency, large-transfer bandwidth,
+or evidence to change a default.
+
+No fused fakequant kernel is installed. The composite deliberately separates
+rounding operations; reassociation or FMA contraction must not remove their
+intermediate F32 rounding. Stock ggml's public CUDA interface does not expose its
+compute stream or a CUDA custom-op registration hook. A local fused path first
+needs a supported launch/stream integration point inside the cached attention
+graph, plus bit-exact validation at each intermediate F32 rounding boundary.
+Launching on the default stream or removing synchronization is not a substitute.
+
+Measured on 2026-10-18: Quadro RTX 8000 (48 GiB, SM75), driver 580.178.04,
+CUDA 13.4, GCC 13.3, Xeon W-2295. Same graph-enabled binary, one ordered
+eager/capture sweep; median microseconds per completed composite call
+(`wall_sync`, with submission-envelope event medians in parentheses):
+
+| Composite mode | Elements | Eager us | Captured us |
+| --- | ---: | ---: | ---: |
+| FP8 power-of-two scale | 512 | 81.006 (81.106) | 46.063 (46.145) |
+| FP8 power-of-two scale | 32768 | 88.709 (88.800) | 53.725 (53.823) |
+| FP4 E4M3 scale | 512 | 107.942 (108.064) | 62.410 (62.500) |
+| FP4 E4M3 scale | 32768 | 109.009 (109.115) | 67.181 (67.276) |
+| FP4 power-of-two scale | 512 | 79.741 (79.835) | 46.711 (46.816) |
+| FP4 power-of-two scale | 32768 | 79.604 (79.712) | 54.043 (54.125) |
+
+All three modes passed the independent finite reference and nonfinite replay
+checks in both settings. Stock capture reduces this synthetic launch overhead;
+it does not fuse the rounding operations. Scratch allocations were at most
+540672 bytes per graph.
+
+The same day's tier sweep gave these median microseconds per call (wall,
+with submission-envelope event medians in parentheses):
+
+| Existing switches | Q2_K us | Q3_K us |
+| --- | ---: | ---: |
+| Neither | 57.841 (58.003) | 59.487 (59.614) |
+| Tier graph only | 57.007 (57.118) | 58.928 (59.135) |
+| DMA overlap only | 57.909 (58.033) | 57.527 (57.647) |
+| Both | 52.517 (52.634) | 54.272 (54.393) |
+
+All four runs matched digests `890bc232eb7bf106` (Q2_K) and
+`040deed8d94e04b0` (Q3_K), with the required hit/PCIe counters and no
+capture-refusal fallback. CPU-reference relative L2 maxima were 0.032147 and
+0.038924, respectively; replay comparisons on the GPU were byte-identical.
+These are tiny 64512/84480-byte expert transfers, not model-size DMA.
+The four settings ran in the displayed order, not an interleaved randomized
+trial. No checkpoint, end-to-end generation, or other GPU/backend was tested;
+the measurements do not justify changing any default. CPU CTest passed 3/3
+(including the existing cache regression); CUDA-build diagnostic CTest passed
+4/4. Only build/test/documentation files changed, not the dense/tier runner
+or global ggml/Strata sources.
+
+## Integrated roadmap measurements
+
+The opt-in roadmap paths were tested together on the local ten-shard Q2_K
+checkpoint using one Quadro RTX 8000, a Xeon W-2295 and a 64 GiB host arena.
+Five 128-input / 32-output trials retained identical generated IDs across
+the eager control, CUDA capture, batch kernels, device activations and combined
+options, and against the previous engine baseline. Decode measured
+0.850-0.863 tok/s and prefill 3.108-3.123 tok/s: these single samples do not
+establish an end-to-end speedup. Each request still read 133.804 GiB from
+storage. No default changed.
+
+The combined CPU suite passed 10/10 and the CUDA suite 19/19. See
+[the benchmark report](bench/RESULTS.md#integrated-roadmap-checkpoint-comparison)
+for exact settings, build revision, commands, results and limitations. This
+does not validate real DSpark speculation or multi-GPU checkpoint generation.
 
 ## Serve through the isolated adapter
 
@@ -116,6 +404,51 @@ The adapter supports text and completed tool calls, including streaming
 OpenAI and Anthropic responses. It rejects unsupported forced tool choice,
 vision, multi-GPU serving, penalties and logit bias. Incremental tool
 argument deltas, batching and session persistence are not implemented.
+
+## DSpark readiness (optional, off by default)
+
+`STRATA_DS41_DSPARK=ON` builds the experimental draft stack and its CPU synthetic
+regression test. It does not enable speculative decoding by itself:
+
+```sh
+cmake -S tools/v41 -B build-ds41-cpu \
+  -DCMAKE_BUILD_TYPE=Release -DSTRATA_DS41_CUDA=OFF \
+  -DSTRATA_DS41_DSPARK=ON
+cmake --build build-ds41-cpu --target ds41_generate test_ds41_dspark --parallel 2
+ctest --test-dir build-ds41-cpu -R 'ds41_(standard|dspark_synthetic|dspark_rollback)$' --output-on-failure
+```
+
+The synthetic test uses small invented weights, not a real model. It checks
+accepted-prefix accounting at every draft depth, deterministic-draft sampling
+(including rejection and filtered-out drafts), rejection boundaries, batched
+and single-row draft-window appends through wraparound, reset/reinitialization,
+and failures for missing, truncated or mismatched sidecars and missing trunk
+metadata. The rollback test compares nonzero synthetic target logits with
+sequential decoding at every depth and rejection boundary, at both compressor
+parities and past the SWA ring wrap. It includes embedded quantized Engram,
+shared ratio-2 compressed KV and shared indexer state; routed expert output is
+zero and activation quantization is off. Removing the odd-position re-feed
+causes this test to fail. Both tests use CPU only, even in a CUDA build.
+These checks do **not** verify target-model rollback with real weights, GPU
+kernels, activation quantization, real-weight acceptance or speed.
+
+Real speculative decoding still needs a matching 1017 DSpark sidecar, the trunk's
+F16 token embeddings, and the GPU layer-major prompt path. No matching sidecar
+was available for this tranche; real-weight speculative decoding remains
+unvalidated. Structural tensor checks do not prove two artifacts came from the
+same checkpoint. Do not substitute a V4 sidecar or infer compatibility from the
+file name or tensor dimensions.
+
+An explicit one-shot request uses `STRATA_DSPARK=/path/to/sidecar.gguf`;
+serving uses `STRATA_SERVE_DSPARK=/path/to/sidecar.gguf` with `--serve`.
+`STRATA_DSPARK_DEPTH` is 1 through 5. Invalid sidecars and failed draft-window
+re-seeding are errors, not successful requests decoded silently without drafts.
+The draft API appends accepted positions only, in increasing order; callers must
+reset it before rewinding or after a backend execution failure.
+Metrics report accepted/proposed drafts and actual verified rows (including
+re-feeds). Accepted rows per pass are not emitted tokens per pass: a stop or
+output budget can end inside an accepted prefix. Empty-draft passes are excluded
+from the full-acceptance percentage. No acceleration claim is made by these tests.
 
 ## Keeping upstream updates
 

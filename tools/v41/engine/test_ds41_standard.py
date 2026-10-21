@@ -2,8 +2,10 @@
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -14,16 +16,18 @@ def string(value):
     return struct.pack("<Q", len(data)) + data
 
 
-def fixture(directory, gpu_experts=False):
-    dim = 256 if gpu_experts else 128
+def fixture(directory, gpu_experts=False, nonzero=False, batch_experts=False):
+    dim = 5120 if batch_experts else 256 if gpu_experts else 128
+    ff = 2304 if batch_experts else dim
+    rank = 128 if batch_experts else dim
     prefix = "deepseek41."
     metadata = {"general.architecture": "deepseek41"}
     integers = {
         "embedding_length": dim, "block_count": 2, "attention.head_count": 1,
         "attention.key_length": 64, "rope.dimension_count": 16,
-        "attention.q_lora_rank": dim, "attention.output_lora_rank": 64,
+        "attention.q_lora_rank": rank, "attention.output_lora_rank": 64,
         "attention.output_group_count": 1, "attention.sliding_window": 4,
-        "expert_count": 2, "expert_used_count": 1, "expert_feed_forward_length": dim,
+        "expert_count": 2, "expert_used_count": 1, "expert_feed_forward_length": ff,
         "expert_shared_count": 1, "hyper_connection.count": 4,
         "hyper_connection.sinkhorn_iterations": 4, "attention.indexer.head_count": 32,
         "attention.indexer.key_length": 128, "attention.indexer.top_k": 1,
@@ -62,12 +66,21 @@ def fixture(directory, gpu_experts=False):
         for dim in shape:
             count *= dim
         if type_id == 8:
-            payload = bytes(count // 32 * 34)
+            payload = (b"".join(struct.pack("<e", 0.01) + bytes([1 + row % 31]) * 32
+                                for row in range(count // 32)) if nonzero else bytes(count // 32 * 34))
         elif type_id in (10, 11):
-            payload = bytes(count // 256 * (84 if type_id == 10 else 110))
+            block = bytes(84 if type_id == 10 else 110)
+            if nonzero:
+                block = (bytes([0x11]) * 16 + bytes([0xe4]) * 64 + struct.pack("<ee", .02, .005)
+                         if type_id == 10 else
+                         bytes([0xaa]) * 32 + bytes([0xe4]) * 64 + bytes([0x21]) * 12 + struct.pack("<e", .02))
+            payload = block * (count // 256)
         else:
             value = 1. if "norm" in name or "engram_q." in name or "engram_k." in name else 0.
-            payload = struct.pack("<f", value) * count
+            if nonzero and value == 0:
+                payload = b"".join(struct.pack("<f", .015 * math.sin(i * .013 + len(tensors))) for i in range(count))
+            else:
+                payload = struct.pack("<f", value) * count
         tensors.append((name, shape, type_id, payload))
 
     add("token_embd.weight", [dim, 4])
@@ -81,14 +94,14 @@ def fixture(directory, gpu_experts=False):
             add(base + f"hc_{site}_scale.weight", [3])
             add(base + f"{site}_norm.weight", [dim])
         for name, shape in (
-            ("attn_sinks", [1]), ("attn_q_a", [dim, dim]), ("attn_q_b", [dim, 64]),
-            ("attn_q_a_norm", [dim]), ("attn_kv", [dim, 64]), ("attn_kv_a_norm", [64]),
+            ("attn_sinks", [1]), ("attn_q_a", [dim, rank]), ("attn_q_b", [rank, 64]),
+            ("attn_q_a_norm", [rank]), ("attn_kv", [dim, 64]), ("attn_kv_a_norm", [64]),
             ("attn_output_a", [64, 64]), ("attn_output_b", [64, dim]),
             ("ffn_gate_inp", [dim, 2]),
-            ("ffn_gate_shexp", [dim, dim]), ("ffn_up_shexp", [dim, dim]),
-            ("ffn_down_shexp", [dim, dim]),
-            ("ffn_gate_exps", [dim, dim, 2]), ("ffn_up_exps", [dim, dim, 2]),
-            ("ffn_down_exps", [dim, dim, 2]),
+            ("ffn_gate_shexp", [dim, ff]), ("ffn_up_shexp", [dim, ff]),
+            ("ffn_down_shexp", [ff, dim]),
+            ("ffn_gate_exps", [dim, ff, 2]), ("ffn_up_exps", [dim, ff, 2]),
+            ("ffn_down_exps", [ff, dim, 2]),
         ):
             type_id = (11 if "down" in name else 10) if gpu_experts and "_exps" in name else 0
             add(base + name + ".weight", shape, type_id)
@@ -97,7 +110,7 @@ def fixture(directory, gpu_experts=False):
     for name, shape in (
         ("attn_compressor_kv", [dim, 64]), ("attn_compressor_norm", [64]),
         ("attn_compressor_gate", [dim, 64]), ("indexer.attn_k", [64, 128]),
-        ("indexer.k_norm", [128]), ("indexer.attn_q_b", [dim, 4096]),
+        ("indexer.k_norm", [128]), ("indexer.attn_q_b", [rank, 4096]),
         ("indexer.proj", [dim, 32]), ("engram_q", [dim, 4]),
         ("engram_k", [dim, 4]), ("engram_wkv", [64, 5 * dim]),
     ):
@@ -138,12 +151,21 @@ def main():
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     parser.add_argument("--dspark-built", action="store_true")
+    parser.add_argument("--rollback-test", action="store_true")
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     directory = args.work.resolve()
     directory.mkdir(parents=True, exist_ok=False)
     try:
-        model, config_path, config = fixture(directory)
+        model, config_path, config = fixture(directory, nonzero=args.rollback_test)
+        if args.rollback_test:
+            result = subprocess.run([str(args.engine.resolve()), "--rollback-test", str(model)],
+                                    env=dict(os.environ, STRATA_V41_CONFIG=str(config_path)),
+                                    text=True, capture_output=True, timeout=180)
+            if result.returncode:
+                raise AssertionError(result.stdout + result.stderr)
+            print(result.stdout, end="")
+            return
         env = dict(os.environ, STRATA_V41_CONFIG=str(config_path))
         for key in ("STRATA_DSPARK", "STRATA_SERVE_DSPARK"):
             env.pop(key, None)
@@ -161,6 +183,11 @@ def main():
             raise AssertionError(result.stdout + result.stderr)
         if len(result.stdout.split()) != 2:
             raise AssertionError("Expected two generated token IDs: " + result.stdout + result.stderr)
+        fallback = subprocess.run(
+            command, env=dict(env, STRATA_DEVICE_ACTIVATIONS="1"), text=True, capture_output=True, timeout=60,
+        )
+        if fallback.returncode or fallback.stdout != result.stdout or "device activations:" in fallback.stderr:
+            raise AssertionError("CPU experts must keep the host activation path: " + fallback.stdout + fallback.stderr)
         if args.backend == "cuda":
             expert_directory = directory / "gpu-experts"
             expert_directory.mkdir()
@@ -185,15 +212,114 @@ def main():
                     if deferred and f"{capacity} experts in VRAM (" not in result.stderr:
                         raise AssertionError("Deferred GPU expert cache seed failed: " + result.stderr)
             print("GPU expert launcher: auto, explicit, zero budget and deferred prompt allocation passed")
+            activation_directory = directory / "activations"
+            activation_directory.mkdir()
+            activation_model, activation_config, _ = fixture(activation_directory, gpu_experts=True, nonzero=True)
+            activation_env = dict(expert_env, STRATA_V41_CONFIG=str(activation_config), STRATA_FILE_GPU="0")
+            for key in ("STRATA_DEVICE_ACTIVATIONS", "STRATA_X_HOST", "STRATA_DEC_HOSTSUM"):
+                activation_env.pop(key, None)
+            activation_command = expert_command.copy()
+            activation_command[activation_command.index("-m") + 1] = str(activation_model)
+            activation_command[activation_command.index("-n") + 1] = "4"
+            forced_path = activation_directory / "forced.txt"
+            forced_path.write_text("0\n2\n3\n0\n")
+            activation_env["STRATA_FORCE_IDS"] = str(forced_path)
+            for slots in ("4", "1", "0"):
+                baseline = None
+                for setting in (None, "0", "1"):
+                    logit_path = activation_directory / f"logits-{slots}-{setting}.f32"
+                    decode_path = activation_directory / f"decode-{slots}-{setting}.f32"
+                    run_env = dict(activation_env)
+                    run_env["STRATA_DUMP_DECODE_LOGITS"] = str(decode_path)
+                    if setting is not None:
+                        run_env["STRATA_DEVICE_ACTIVATIONS"] = setting
+                    result = subprocess.run(
+                        activation_command + ["--slots", slots, "--vram-margin", "10000" if slots == "0" else "0",
+                                              "--dump-logits", str(logit_path)],
+                        env=run_env, text=True, capture_output=True, timeout=60,
+                    )
+                    if result.returncode:
+                        raise AssertionError("Activation generation failed: " + result.stdout + result.stderr)
+                    logits = logit_path.read_bytes()
+                    decode = decode_path.read_bytes()
+                    if len(decode) != 4 * 4 * 4:
+                        raise AssertionError("Expected four decode vocabulary rows")
+                    values = struct.unpack("<" + "f" * (len(decode) // 4), decode)
+                    if not values or not all(math.isfinite(v) for v in values) or not any(values):
+                        raise AssertionError("Activation fixture must have finite, nonzero logits")
+                    # The only change is where identical F32 bytes are quantized: require exact logits and tokens.
+                    observed = (result.stdout, logits, decode)
+                    if baseline is None:
+                        baseline = observed
+                    elif observed != baseline:
+                        raise AssertionError(f"Activation setting={setting}, slots={slots} changed logits/tokens")
+                    if setting == "1":
+                        transfers = re.search(
+                            r"device activations: dense D2H skipped (\d+) bytes .*decode tier "
+                            r"D2H (\d+) / H2D (\d+) bytes, direct (\d+) calls", result.stderr,
+                        )
+                        if not transfers or int(transfers[1]) == 0:
+                            raise AssertionError("Opt-in did not skip the dense activation readback: " + result.stderr)
+                        _, d2h, h2d, direct = map(int, transfers.groups())
+                        if slots == "4" and (d2h or h2d or direct == 0):
+                            raise AssertionError("All-resident decode still staged activations: " + result.stderr)
+                        if slots == "0" and (d2h == 0 or h2d != d2h or direct):
+                            raise AssertionError("No-cache CPU misses lost their activation fallback: " + result.stderr)
+                        print(f"Device activation slots={slots}: dense D2H skipped={transfers[1]} bytes; "
+                              f"decode tier D2H={d2h} H2D={h2d} bytes, direct={direct}")
+                    elif "device activations:" in result.stderr:
+                        raise AssertionError("Unset/zero activation opt-in changed the default path")
+            print("Device activations: unset/zero/on exact nonzero logits and tokens; all-GPU, mixed and no-cache passed")
+            for flag in ("--chunk-batch", "--no-chunk-batch"):
+                result = subprocess.run(
+                    expert_command + ["--slots", "1", "--prompt-batch", "2", "--prefill-chunk", "2", flag],
+                    env=expert_env, text=True, capture_output=True, timeout=60,
+                )
+                if result.returncode or len(result.stdout.split()) != 2:
+                    raise AssertionError("Native batch flag failed on fallback layout: " +
+                                         result.stdout + result.stderr)
+            print("Native batch CLI: enabled/disabled options accepted on unsupported-width fallback fixture")
+            batch_directory = directory / "batch-experts"
+            batch_directory.mkdir()
+            batch_model, batch_config, _ = fixture(batch_directory, gpu_experts=True, batch_experts=True)
+            batch_env = dict(expert_env, STRATA_V41_CONFIG=str(batch_config), MIMO_CHUNK_PROF="1")
+            batch_command = expert_command.copy()
+            batch_command[batch_command.index("-m") + 1] = str(batch_model)
+            outputs = []
+            for flag in ("--no-chunk-batch", "--chunk-batch"):
+                result = subprocess.run(
+                    batch_command + ["--slots", "1", "--prompt-batch", "2", "--prefill-chunk", "2", flag],
+                    env=batch_env, text=True, capture_output=True, timeout=120,
+                )
+                if result.returncode or len(result.stdout.split()) != 2:
+                    raise AssertionError("Full-width native batch CLI failed: " + result.stdout + result.stderr)
+                if ("chunk batch:" in result.stderr) != (flag == "--chunk-batch"):
+                    raise AssertionError("Full-width batch dispatch was not selected as requested: " + result.stderr)
+                outputs.append(result.stdout.split())
+            if outputs[0] != outputs[1]:
+                raise AssertionError("Full-width batch CLI changed generated token IDs")
+            print("Native batch CLI: full-width 5120/2304 Q2_K/Q3_K dispatch exercised; enabled/disabled IDs match")
         for extra, message in (
             (["--chunk-mmq"], "--chunk-mmq is unavailable"),
+            (["--chunk-batch"], "--chunk-batch requires --experts gpu"),
             (["--expert-gpus", "0,1"], "unknown argument --expert-gpus"),
             (["--experts", "invalid"], "--experts must be cpu|gpu"),
         ):
             result = subprocess.run(command + extra, env=env, text=True, capture_output=True, timeout=60)
             if result.returncode != 2 or message not in result.stderr:
                 raise AssertionError("Unsupported option was not rejected: " + result.stderr)
-        if not args.dspark_built:
+        if args.dspark_built:
+            for settings, message in (
+                ({"STRATA_SERVE_DSPARK": "unused.gguf"}, "use STRATA_DSPARK"),
+                ({"STRATA_DSPARK": ""}, "sidecar path must not be empty"),
+                *(({"STRATA_DSPARK": "unused.gguf", "STRATA_DSPARK_DEPTH": depth}, "integer in 1..5")
+                  for depth in ("0", "6", "-1", "2junk", "")),
+            ):
+                result = subprocess.run(command, env=dict(env, **settings), text=True,
+                                        capture_output=True, timeout=60)
+                if result.returncode != 2 or message not in result.stderr:
+                    raise AssertionError("Invalid DSpark option was not rejected: " + result.stderr)
+        else:
             for key in ("STRATA_DSPARK", "STRATA_SERVE_DSPARK"):
                 result = subprocess.run(
                     command, env=dict(env, **{key: "not-built.gguf"}),
